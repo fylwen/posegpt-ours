@@ -1,0 +1,8 @@
+python3 auto_encode.py  --name auto_encoder_debug --n_codebook 2 --n_e 512 --e_dim 256 --loss l2 --model CausalVQVAE --dropout 0 --freq_vert 2 --learning_rate 5e-5 --alpha_vert 100. --ab1 0.95 --tprop_vert 0.1 --prefetch_factor 4  --alpha_codebook 1. --hid_dim 384 --alpha_codebook 0.25 --train_batch_size 64 --debug 1 --dummy_data 1
+
+
+python3 auto_encode.py  --name auto_encoder --n_codebook 2 --n_e 512 --e_dim 256 --loss l2 --model CausalVQVAE --dropout 0 --freq_vert 2 --learning_rate 5e-5 --alpha_vert 100. --ab1 0.95 --tprop_vert 0.1 --prefetch_factor 4  --alpha_codebook 1. --hid_dim 384 --alpha_codebook 0.25 --train_batch_size 64
+
+python3 auto_encode.py  --name auto_encoder --n_codebook 2 --n_e 512 --e_dim 256 --loss l2 --model CausalVQVAE --dropout 0 --freq_vert 2 --learning_rate 5e-5 --alpha_vert 100. --ab1 0.95 --tprop_vert 0.1 --prefetch_factor 4  --alpha_codebook 1. --hid_dim 384 --alpha_codebook 0.25 --train_batch_size 64
+
+python3 auto_encode.py  --name auto_encoder --n_codebook 2 --n_e 512 --e_dim 256 --loss l2 --model CausalVQVAE --dropout 0 --freq_vert 2 --learning_rate 5e-5 --alpha_vert 100. --ab1 0.95 --tprop_vert 0.1 --prefetch_factor 4  --alpha_codebook 1. --hid_dim 384 --alpha_codebook 0.25 --train_batch_size 64
