@@ -98,11 +98,16 @@ class VectorQuantizer(nn.Module):
     def track_assigment(self, emb_ind, i):
         self.trackers[i].update(emb_ind)
 
-    def forward_one(self, z, i, weights=None):
+    def forward_one(self, z, i, weights=None,verbose=False):
         bsize = self.e_dim // self.nbooks
+        if verbose:
+            print("e_dim, nbooks", self.e_dim, self.nbooks)#[256,2]
         e_dim = bsize  if i < self.nbooks - 1 else self.e_dim - (self.nbooks - 1) * bsize
 
         z_flattened = z.view(-1, e_dim)
+        if verbose:
+            print("z",z.shape)#[bs,len_seq//2, e_dim]
+            print("z_flattened", z_flattened.shape)
         dist = L2_efficient(z_flattened, self.embeddings[str(i)].weight.t())
 
         if self.balance and weights is not None:
@@ -123,8 +128,10 @@ class VectorQuantizer(nn.Module):
         #min_encoding_indices.view(z.shape)
         return z_q, min_encoding_indices.view(z.shape[:-1] + (1,))
 
-    def forward(self, z, p=1.0):
+    def forward(self, z, p=1.0, verbose=False):
         assert z.size(2) == self.e_dim
+        if verbose:
+            print("z//len(self_embeddings)",z.shape,z.size(2),len(self.embeddings))#[bs,len_seq//2, dim], len(self.embeddings)=2
         zs = torch.split(z, z.size(2) // len(self.embeddings), dim=-1)
         zq_i = [self.forward_one(z, i, self.get_hist(i)) for i, z in enumerate(zs)]
         z_q, min_encoding_indices = [torch.cat([e[i] for e in zq_i], dim=-1) for i in [0,1]]

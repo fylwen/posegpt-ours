@@ -211,10 +211,13 @@ class TransformerAutoEncoder(nn.Module):
                    if n_layers[i]])
         dim = n_embd
         # Final head to predict body and root paramaters
+        self.reg_comp= nn.Sequential(nn.Linear(dim, dim), nn.ReLU(), nn.Linear(dim, self.in_dim))
+        '''
         self.reg_body = nn.Sequential(nn.Linear(dim, dim),
                                  nn.ReLU(), nn.Linear(dim, self.in_dim - 3))
         self.reg_root = nn.Sequential(nn.Linear(dim, dim),
                                  nn.ReLU(), nn.Linear(dim, 3))
+        '''
     
     def encoder(self, return_mask=False, *args, **kwargs):
         """ Calls each encoder stack sequentially """
@@ -231,7 +234,7 @@ class TransformerAutoEncoder(nn.Module):
         return (o, m) if return_mask else o
 
     def regressor(self, x):
-        return self.reg_body(x), self.reg_root(x)
+        return self.reg_comp(x)#self.reg_body(x), self.reg_root(x)
     def prepare_batch(self, x, *args,  **kwargs):
         return x
 
@@ -277,6 +280,9 @@ class TransformerVQVAE(TransformerAutoEncoder):
         self.quantizer = VectorQuantizer(n_e=n_e, e_dim=e_dim,
                                          beta=beta, nbooks=n_codebook)
 
+        
+        self.placeholder_joints=torch.nn.Parameter(torch.randn(1,42,3))
+
     def forward_encoder(self, x, mask):
         """"
         Run the forward pass of the encoder
@@ -293,16 +299,23 @@ class TransformerVQVAE(TransformerAutoEncoder):
         seq_len_hid = z.shape[1]
         return self.decoder(z=z, mask=mask, return_mask=return_mask)
 
-    def forward(self, *, x, y, valid, quant_prop=1.0, **kwargs):
-        mask = valid
-
+    def forward(self, batch0, quant_prop=1.0,verbose=False, **kwargs):
+        x=batch0['batch_seq_hand_comp_gt']
         batch_size, seq_len, *_ = x.size()
+
+
+        valid=batch0['valid_frame'].view(batch_size,seq_len)
+        mask = valid
+        if verbose:
+            print("x/mask",x.shape,mask.shape)#[bs,seq_len,153],[bs,seq_len]
 
         x = self.prepare_batch(x, mask)
 
         hid, mask_ = self.forward_encoder(x=x, mask=mask)
 
-        z = self.quant_emb(hid)
+        z = self.quant_emb(hid)#FC
+        if verbose:
+            print("hid,mask_,z",hid.shape,mask_.shape,z.shape)#[bs,seq_len//2,384],[bs,seq_len//2],[bs,seq_len//2,256]
 
         if mask_ is None:
             mask_ = F.interpolate(mask.float().reshape(batch_size, 1, seq_len, 1),
@@ -311,21 +324,25 @@ class TransformerVQVAE(TransformerAutoEncoder):
         else:
             mask_ = mask_.float().long()
 
-        z_q, z_loss, indices = self.quantize(z, mask_, p=quant_prop)
+        z_q, z_loss, indices = self.quantize(z, mask_, p=quant_prop,verbose=verbose)
 
-        hid = self.post_quant_emb(z_q) # this one is i.i.d
+        if verbose:
+            print("z_q,indices",z_q.shape,indices.shape)#[bs,seq_len//2,256],[bs,seq_len//2,2]: 2 for two codebooks
+
+        hid = self.post_quant_emb(z_q) # this one is i.i.d, FC
 
         y = self.forward_decoder(z=hid, mask=mask_)
 
-        rotmat, trans = self.regressor(y)
+        output_comp = self.regressor(y)
 
-        rotmat = rotmat.reshape(batch_size, seq_len, -1, 3, 2)
+        if verbose:
+            print("y,output_comp",y.shape,output_comp.shape)#[bs,seq_len,384],[bs,seq_len,153]
 
-        rotmat = roma.special_gramschmidt(rotmat)
+        #rotmat = rotmat.reshape(batch_size, seq_len, -1, 3, 2)
+        #rotmat = roma.special_gramschmidt(rotmat)
 
         kl = math.log(self.one_codebook_size) * torch.ones_like(indices, requires_grad=False)
-
-        return (rotmat, trans), {'quant_loss': z_loss, 'kl': kl, 'kl_valid': mask_}, indices
+        return output_comp, {'quant_loss': z_loss, 'kl': kl, 'kl_valid': mask_}, indices
 
     def forward_latents(self, x, mask, return_indices=False, do_pdb=False, return_mask=False, *args, **kwargs):
         """ Forward the encoder, return the quantized latent variables. """
@@ -364,8 +381,8 @@ class TransformerVQVAE(TransformerAutoEncoder):
         rotmat = roma.special_gramschmidt(rotmat)
         return (rotmat, trans), valid
 
-    def quantize(self, z, valid=None, p=1.0):
-        z_q, loss, indices = self.quantizer(z, p=p)
+    def quantize(self, z, valid=None, p=1.0,verbose=False):
+        z_q, loss, indices = self.quantizer(z, p=p,verbose=verbose)
 
         if valid is not None:
             loss = torch.sum(loss * valid) / torch.sum(valid)

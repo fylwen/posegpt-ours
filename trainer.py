@@ -8,7 +8,7 @@ import smplx
 import os
 import yaml
 
-from human_body_prior.tools.omni_tools import copy2cpu as c2c
+#from human_body_prior.tools.omni_tools import copy2cpu as c2c
 from utils.constants import SMPLX_DIR, mm
 from utils.body_model import pose_to_vertices
 from torch.utils.tensorboard import SummaryWriter
@@ -34,21 +34,21 @@ class Trainer():
         self.device = device
         self.optimizer = optimizer
         self.seq_len = seq_len
-        self.bm = smplx.create(SMPLX_DIR, type, use_pca=False, batch_size=seq_len).to(device)
+        #self.bm = smplx.create(SMPLX_DIR, type, use_pca=False, batch_size=seq_len).to(device)
         self.loss_scaler = loss_scaler
 
-        for param in self.bm.parameters():
-            param.requires_grad = False
+        #for param in self.bm.parameters():
+        #    param.requires_grad = False
 
-        self.faces = torch.as_tensor(np.array(c2c(self.bm.faces), dtype=np.int32), device=device)[None, :, :]
-        self.type = type
+        #self.faces = torch.as_tensor(np.array(c2c(self.bm.faces), dtype=np.int32), device=device)[None, :, :]
+        #self.type = type
         self.init_logdir()
         self.current_iter = start_iter
         self.current_epoch = epoch
         self.model = model
         self.model.seq_len = seq_len
-        self.pose_to_vertices = partial(pose_to_vertices, pose_type=self.type,
-                                        alpha=self.args.alpha_trans, bm=self.bm)
+        #self.pose_to_vertices = partial(pose_to_vertices, pose_type=self.type,
+        #                                alpha=self.args.alpha_trans, bm=self.bm)
         self.classifier = None
         self.preparator = Preparator(seq_len=args.seq_len,
                                      mask_trans=args.mask_trans,

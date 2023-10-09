@@ -11,6 +11,8 @@ import numpy as np
 import roma
 import smplx
 import torch
+import torch.nn.functional as torch_f
+from einops import repeat
 from tqdm import tqdm
 
 from models.transformer_vqvae import CausalVQVAE, OnlineVQVAE, TransformerVQVAE, OfflineVQVAE
@@ -28,6 +30,23 @@ from utils.utils import (count_dim, subsamble_random_offset,
     valid_reduce as _valid_reduce)
 from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 
+
+
+from meshreg.datasets import collate
+from meshreg.netscripts import reloadmodel,get_dataset
+from meshreg.models.utils import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt
+from torch.utils.data._utils.collate import default_collate
+
+from distutils.dir_util import copy_tree
+import shutil
+
+
+print('*********Sucessfully import*************')
+extend_queries = []
+def collate_fn(seq, extend_queries=extend_queries):
+    return collate.seq_extend_flatten_collate(seq,extend_queries)#seq_extend_collate(seq, extend_queries)
+
+
 if not sys.warnoptions:
     warnings.simplefilter("ignore")
 
@@ -40,6 +59,7 @@ class QTrainer(Trainer):
         self.best_val = 1e5 if best_val is None else best_val
         self.best_class = -1e5 if best_class is None else best_class
 
+        '''
         if hasattr(self.args, 'tprop_vert') and self.args.tprop_vert != 1.:
             """ Apply loss on vertices, for certain time steps only"""
             self.tdim = int(self.seq_len * self.args.tprop_vert)
@@ -52,65 +72,202 @@ class QTrainer(Trainer):
             self.tdim = self.seq_len
             print("Warning: this will be slow. If you are sure, discard & proceed.")
             sys.exit(0)
+        '''
 
-    def forward_one_batch(self, x, actions, valid, loss_type, trans_gt, rotmat, rotvec, training=True):
+        self.base_frame_id=0
+        self.hand_scaling_factor=10
+        self.pose_loss=torch_f.l1_loss
+
+    def get_gt_inputs_feature(self,batch_flatten,verbose=False):   
+        verbose=True
+        return_batch={}
+        for key in ["valid_frame","hand_size_left","hand_size_right"]:
+            return_batch[key]=batch_flatten[key].cuda()
+        if not "batch_action_name_obsv" in batch_flatten.keys():
+            return_batch["batch_action_name_obsv"]=batch_flatten["action_name"][0::self.seq_len]
+        else:
+            return_batch["batch_action_name_obsv"]=batch_flatten["batch_action_name_obsv"]
+            
+        flatten_comps, hand_gts = get_flatten_hand_feature(batch_flatten, 
+                                        len_seq=self.seq_len, 
+                                        spacing=1,
+                                        base_frame_id=self.base_frame_id,
+                                        factor_scaling=self.hand_scaling_factor, 
+                                        masked_placeholder=self.model.placeholder_joints,
+                                        with_augmentation=False,#is_train,
+                                        compute_local2first=False,#True,
+                                        verbose=verbose)
+                 
+        flatten_hand_comp_gt=flatten_comps["gt"]
+        dim_hand_feature=flatten_hand_comp_gt.shape[-1]
+        
+        batch_seq_hand_comp_gt = flatten_hand_comp_gt.view(-1,self.seq_len, dim_hand_feature)
+        batch_seq_valid_features=hand_gts["flatten_valid_features"].view(-1,self.seq_len,dim_hand_feature)
+        batch_seq_valid_frame=return_batch["valid_frame"].view(-1,self.seq_len,1)
+        batch_seq_valid_features=torch.mul(batch_seq_valid_features,batch_seq_valid_frame)
+        
+        return_batch["batch_seq_hand_comp_gt"]=batch_seq_hand_comp_gt
+        return_batch["batch_seq_valid_features"]=batch_seq_valid_features
+        return_batch.update(hand_gts)
+
+        if verbose:
+            for k,v in return_batch.items():
+                try:
+                    print(k,v.shape)
+                except:
+                    print(k,len(v))
+        
+        return return_batch
+    
+    
+    def batch_seq_from_comp_to_joints(self, batch_seq_comp,batch_mean_hand_size,trans_info, normalize_size_from_comp,batch_seq_valid_features=None, verbose=False):
+        results={}
+        batch_size,len_seq=batch_seq_comp.shape[0],batch_seq_comp.shape[1]
+        hand_left_size=repeat(batch_mean_hand_size[0],'b ()-> b n',n=len_seq)
+        hand_right_size=repeat(batch_mean_hand_size[1],'b ()-> b n',n=len_seq)
+        flatten_mean_hand_size=[torch.flatten(hand_left_size),torch.flatten(hand_right_size)]
+
+        if normalize_size_from_comp:            
+            assert False, "Not implemented yet"
+        else:
+            batch_seq_comp2=batch_seq_comp
+
+        flatten_out=from_comp_to_joints(batch_seq_comp2, flatten_mean_hand_size, factor_scaling=self.hand_scaling_factor,trans_info=trans_info)
+        for key in ["base","cam","local"]:        
+            results[f"batch_seq_joints3d_in_{key}"]=flatten_out[f"joints_in_{key}"].view(batch_size,len_seq,42,3)
+        results["batch_seq_local2base"]=flatten_out["local2base"].view(batch_size,len_seq,flatten_out["local2base"].shape[-1])
+        results["batch_seq_trans_info"]=flatten_out["batch_seq_trans_info"]
+        return results
+
+
+    def compute_hand_loss(self, batch_seq_comp_gt, batch_seq_comp_out, batch_seq_valid_features, compute_local2base,
+                 batch_mean_hand_size, trans_info,normalize_size_from_comp, verbose=False):
+                 
+        losses={}
+        results={}
+        total_loss=0.
+        if verbose:
+            print("batch_seq_comp_gt/batch_seq_comp_out,batch_seq_valid_features",batch_seq_comp_gt.shape,batch_seq_comp_out.shape,batch_seq_valid_features.shape)
+         
+        recov_hand_loss=self.pose_loss(batch_seq_comp_gt,batch_seq_comp_out,reduction='none')
+        if verbose:
+            print('recov_hand_loss',torch.abs(recov_hand_loss).max(),recov_hand_loss.shape)#[bs,len_seq,144]
+        recov_hand_loss=torch.mul(recov_hand_loss,batch_seq_valid_features)
+        cnt=torch.sum(batch_seq_valid_features)
+        losses["recov_hand_loss"]=torch.sum(recov_hand_loss)/torch.where(cnt<1.,1.,cnt)#torch.mean(recov_hand_loss) 
+        total_loss+=losses["recov_hand_loss"]
+
+        if not compute_local2base:
+            return total_loss,results,losses
+
+        #trjectory only for pred
+        output_results=self.batch_seq_from_comp_to_joints(batch_seq_comp=batch_seq_comp_out,
+                                                        batch_mean_hand_size=batch_mean_hand_size,
+                                                        trans_info=trans_info,
+                                                        normalize_size_from_comp=normalize_size_from_comp, 
+                                                        batch_seq_valid_features=batch_seq_valid_features,
+                                                        verbose=verbose)
+        for k in output_results.keys():
+            if "joints" in k:
+                results[k+"_out"]=output_results[k]
+            if "batch_seq_comp_local_normalized" in k:
+                results[k]=output_results[k]
+        return total_loss,results,losses
+
+    def forward_one_batch(self, batch_flatten, loss_type,training=True,verbose=False):
         # Forward model
-        (rotmat_hat, trans_delta_hat), loss_z, indices = self.model(
-            x=x, y=actions, valid=valid)
-        trans_hat = get_trans(trans_delta_hat, valid)
+        batch0=self.get_gt_inputs_feature(batch_flatten)
 
-        verts, verts_hat, verts_valid = None, None, None
-        if training:
-            # Convert smpl sequence to sequence of vertices
-            verts, verts_hat, verts_valid = self.params_to_vertices(rotmat_hat, rotvec, trans_gt, trans_hat, valid)
+        output_comp, loss_z, indices = self.model(batch0,verbose=verbose)
+        
+        
+        #trans_hat = get_trans(trans_delta_hat, valid)
 
+        #verts, verts_hat, verts_valid = None, None, None
+        #if training:
+        #    # Convert smpl sequence to sequence of vertices
+        #    verts, verts_hat, verts_valid = self.params_to_vertices(rotmat_hat, rotvec, trans_gt, trans_hat, valid)
+        
         # Define masked reductions
-        def valid_reduce(x, mask=None, reduction='sum'):
-            """ Accounts for 0 padding in shorter sequences """
-            if len(x.shape) == 1 and x.shape[0] == 1: # Just a scalar
-                return x.sum() if reduction == 'sum' else x.mean()
-            mask = (valid if valid.shape[1] == x.shape[1] else
-                    verts_valid) if mask is None else mask
-            return _valid_reduce(x, mask, reduction)
+        #def valid_reduce(x, mask=None, reduction='sum'):
+        #    """ Accounts for 0 padding in shorter sequences """
+        #    if len(x.shape) == 1 and x.shape[0] == 1: # Just a scalar
+        #        return x.sum() if reduction == 'sum' else x.mean()
+        #    mask = (valid if valid.shape[1] == x.shape[1] else
+        #            verts_valid) if mask is None else mask
+        #    return _valid_reduce(x, mask, reduction)
 
-        valid_sum = partial(valid_reduce, reduction='sum')
-        valid_mean = partial(valid_reduce, reduction='mean')
+        #valid_sum = partial(valid_reduce, reduction='sum')
+        #valid_mean = partial(valid_reduce, reduction='mean')
 
         # Predictions, targets and ground truths
-        pred = {'trans': trans_hat, 'vert': verts_hat, 'body': rotmat_hat[:, :, 1:, ...],
-                'root': rotmat_hat[:, :, 0, ...].unsqueeze(2)}
-        gt = {'trans': trans_gt, 'vert': verts, 'body': rotmat[:, :, 1:, ...],
-              'root': rotmat[:, :, 0, ...].unsqueeze(2)}
+        #pred = {'trans': trans_hat, 'vert': verts_hat, 'body': rotmat_hat[:, :, 1:, ...],
+        #        'root': rotmat_hat[:, :, 0, ...].unsqueeze(2)}
+        #gt = {'trans': trans_gt, 'vert': verts, 'body': rotmat[:, :, 1:, ...],
+        #      'root': rotmat[:, :, 0, ...].unsqueeze(2)}
 
         # Variance can be learned; not used by default
-        log_sigmas = self.model.log_sigmas if loss_type in ['gaussian', 'laplacian'] else \
-            {k: torch.zeros((1), requires_grad=False).to(x.device) for k in pred.keys()}
+        #log_sigmas = self.model.log_sigmas if loss_type in ['gaussian', 'laplacian'] else \
+        #    {k: torch.zeros((1), requires_grad=False).to(x.device) for k in pred.keys()}
 
-        nll_loss = gaussian_nll if loss_type in ['gaussian', 'l2'] else laplacian_nll
-        nll_verts_loss = laplacian_nll if not self.args.l2_verts else gaussian_nll
-        nll = {k: nll_loss(pred[k], gt[k], log_sigmas[k]) for k in ['trans', 'root', 'body']}
-        nll.update({'vert': nll_verts_loss(pred['vert'], gt['vert'], log_sigmas['vert'])})
+        #nll_loss = gaussian_nll if loss_type in ['gaussian', 'l2'] else laplacian_nll
+        #nll_verts_loss = laplacian_nll if not self.args.l2_verts else gaussian_nll
+        #nll = {k: nll_loss(pred[k], gt[k], log_sigmas[k]) for k in ['trans', 'root', 'body']}
+        #nll.update({'vert': nll_verts_loss(pred['vert'], gt['vert'], log_sigmas['vert'])})
 
         # Energy and norm seperated for logging;
-        energy_values, norm_values, nll_values = [{k: nll[k][n] for k in nll.keys()} for n in ['energy', 'norm', 'nll']]
+        #energy_values, norm_values, nll_values = [{k: nll[k][n] for k in nll.keys()} for n in ['energy', 'norm', 'nll']]
 
         # Elbo computations (for logging, not optimized by sgd)
-        elbo_params, elbo_verts, valid_kl = self.compute_elbos(nll_values, valid_sum, loss_z)
+        #elbo_params, elbo_verts, valid_kl = self.compute_elbos(nll_values, valid_sum, loss_z)
 
         # Gather losses and multiply by the right coefficients
-        losses = ['root', 'body', 'trans'] + (['vert'] if pred['vert'] is not None else [])
-        total_loss = sum([getattr(self.args, 'alpha_' + k) * valid_mean(nll_values[k]).mean(0) for k in losses])
-        total_loss += self.args.alpha_codebook * loss_z['quant_loss']
+        #losses = ['root', 'body', 'trans'] + (['vert'] if pred['vert'] is not None else [])
+        #total_loss = sum([getattr(self.args, 'alpha_' + k) * valid_mean(nll_values[k]).mean(0) for k in losses])
+        batch_seq_valid_frame=batch0["valid_frame"].view(-1,self.seq_len)
+        batch_seq_hand_size_left=torch.mul(batch0['hand_size_left'],batch0["valid_frame"]).view(-1,self.seq_len)
+        batch_mean_hand_left_size=torch.sum(batch_seq_hand_size_left,dim=1,keepdim=True)/torch.sum(batch_seq_valid_frame,dim=1,keepdim=True)
 
+        batch_seq_hand_size_right=torch.mul(batch0['hand_size_right'],batch0["valid_frame"]).view(-1,self.seq_len)
+        batch_mean_hand_right_size=torch.sum(batch_seq_hand_size_right,dim=1,keepdim=True)/torch.sum(batch_seq_valid_frame,dim=1,keepdim=True)
+
+
+        trans_info={}
+        for k in ['flatten_firstclip_R_base2cam_left','flatten_firstclip_t_base2cam_left','flatten_firstclip_R_base2cam_right','flatten_firstclip_t_base2cam_right']:
+            trans_info[k]=batch0[k]       
+        verbose=True
+        total_loss,results_hand,loss_hand=self.compute_hand_loss(batch_seq_comp_gt=batch0["batch_seq_hand_comp_gt"], 
+                                                            batch_seq_comp_out=output_comp, 
+                                                            batch_seq_valid_features=batch0["batch_seq_valid_features"], 
+                                                            compute_local2base=verbose,
+                                                            batch_mean_hand_size=(batch_mean_hand_left_size,batch_mean_hand_right_size),
+                                                            trans_info=trans_info,
+                                                            normalize_size_from_comp=False,verbose=True)
+
+        if verbose:
+            results={}
+            for k in ["base","local","cam"]:
+                joints3d_out=results_hand[f"batch_seq_joints3d_in_{k}_out"]/self.hand_scaling_factor
+                results[f"batch_seq_joints3d_in_{k}_pred_out"]=joints3d_out
+                
+                joints3d_gt=batch0[f"flatten_joints3d_in_{k}_gt"].view(joints3d_out.shape)/self.hand_scaling_factor
+                results[f"batch_seq_joints3d_in_{k}_gt"]=joints3d_gt
+
+                if verbose:
+                    print(k,torch.abs(joints3d_gt-joints3d_out).max())
+
+        total_loss += self.args.alpha_codebook * loss_z['quant_loss']
         # Putting usefull statistics together (for tensorboard)
-        statistics = {'elbo/valid_kl': valid_kl, 'elbo/params': elbo_params, 'elbo/verts': elbo_verts,
-                      'total_loss': total_loss, 'quant_loss': loss_z['quant_loss'] if 'quant_loss' in loss_z else 0}
-        for tag, vals in zip(['', '_energy', '_norm'], [nll_values, energy_values, norm_values]):
-            statistics.update({'nll/' + k + tag: valid_mean(vals[k]).mean(0) for k in nll_values.keys()})
+        statistics = {#'elbo/valid_kl': valid_kl, 'elbo/params': elbo_params, 'elbo/verts': elbo_verts,
+                      'total_loss': total_loss,'quant_loss': loss_z['quant_loss'] if 'quant_loss' in loss_z else 0}
+        statistics.update(loss_hand)
+        
+        #for tag, vals in zip(['', '_energy', '_norm'], [nll_values, energy_values, norm_values]):
+        #    statistics.update({'nll/' + k + tag: valid_mean(vals[k]).mean(0) for k in nll_values.keys()})
 
         # Return pose predictions (smpl and vertices), centroid indices and mask)
-        outputs = {'rotmat_hat': rotmat_hat, 'trans_hat': trans_hat, 'indices': indices, 'valid': valid}
-        return total_loss, statistics, outputs
+        #outputs = {'rotmat_hat': rotmat_hat, 'trans_hat': trans_hat, 'indices': indices, 'valid': valid}
+        return total_loss, statistics, results
 
     def compute_elbos(self, nll_values, valid_sum, loss_z):
         """ Elbos are usefull for logging (put reconstruction and KL together) in principle."""
@@ -140,7 +297,7 @@ class QTrainer(Trainer):
             verts, verts_hat = [ptv(torch.cat([r.flatten(2), t], -1))
                                 for r, t in zip([_rotvec, _rotvec_hat], [_trans, _trans_hat])]
         return verts, verts_hat, verts_valid
-
+    
     def train_n_iters(self, data, loss_type):
         """ Do a pass on the dataset; sometimes log statistics"""
         self.model.train()
@@ -150,17 +307,18 @@ class QTrainer(Trainer):
 
         end = time.time()
         print(red("> Training auto-encoder..."))
-        for x, valid, actions in tqdm(data):
+        for batch_flatten in tqdm(data):
             data_time.update(time.time() - end)
 
             # Input preparation
-            x, valid = x.to(self.device), valid.to(self.device)
+            #x, valid = x.to(self.device), valid.to(self.device)
             #x, rotvec, rotmat, trans_gt, _ = prepare_input(x)
-            x_noise, rotvec, rotmat, trans_gt, _, _ = self.preparator(x)
+            #x_noise, rotvec, rotmat, trans_gt, _, _ = self.preparator(x)
 
 
             # TODO refactor with a context manager to avoid code duplication.
             if self.args.use_amp:
+                assert False, "AMP not supported yet."
                 assert self.loss_scaler is not None, "Need a loss scaler for AMP."
                 with torch.cuda.amp.autocast():
                     total_loss, statistics, outputs = self.forward_one_batch(x_noise, actions, valid,
@@ -170,8 +328,7 @@ class QTrainer(Trainer):
                                  update_grad=True)
 
             else:
-                total_loss, statistics, outputs = self.forward_one_batch(x_noise, actions,
-                        valid, loss_type, trans_gt, rotmat, rotvec)
+                total_loss, statistics, outputs = self.forward_one_batch(batch_flatten,loss_type)
 
                 # optimization
                 self.optimizer.zero_grad()
@@ -358,7 +515,7 @@ def main(args=None):
     # -train_data_dir  --val_data_dir
     parser.add_argument("--n_train", type=int, default=1000000)
     parser.add_argument("--n_iter_val", type=int, default=None)
-    parser.add_argument("--save_dir", type=str, default='logs')
+    parser.add_argument("--save_dir", type=str, default='../ckpts_panda/checkpoints/posegpt')
     parser.add_argument("--name", type=str, default='debug')
 
     parser.add_argument("--learning_rate", "-lr", type=float, default=1e-5)
@@ -399,7 +556,21 @@ def main(args=None):
     parser.add_argument("--eos_force", type=int, default=1, choices=[0,1])
     parser.add_argument("--use_amp", type=int, default=0, choices=[0, 1])
 
+
+    #dataset parameters
+    parser.add_argument('--dataset_folder',default='../')
+    
+    # Dataset params
+    parser.add_argument("--train_datasets", choices=["h2o", "ass101","asshand"], default=["ass101"],nargs="+")
+    parser.add_argument("--train_splits", default=["train"], nargs="+")
+    parser.add_argument("--val_datasets", choices=["h2o","ass101","asshand"],  default=["h2o"], nargs="+")
+    parser.add_argument("--val_splits", default=["val"], nargs="+")
+
+
+
+
     script_args, _ = parser.parse_known_args(args)
+    print("build model with",script_args.model)
     Model = {'CausalVQVAE': CausalVQVAE, 'OnlineVQVAE': OnlineVQVAE,
             'TransformerVQVAE': TransformerVQVAE, 'OfflineVQVAE': OfflineVQVAE}[script_args.model]
 
@@ -411,42 +582,72 @@ def main(args=None):
     except:
         args.factor = 1
 
-    if args.debug:
-        args.num_workers = 1
-        args.n_iters_per_epoch = 20
-        args.class_freq = 1
-        args.fid_freq = 1
-        args.val_freq = 1
-        args.spin_freq = 1
-        args.visu_freq = 1
-        args.log_freq = 5
-        args.train_batch_size = 23  # Hard to confuse with an other dimension
-        args.train_data_dir = 'data/smplx/babel_trimmed/train_60/seqLen900_fps30_overlap0_minSeqLen16_nMax1000'
-        args.val_data_dir = 'data/smplx/babel_trimmed/train_60/seqLen900_fps30_overlap0_minSeqLen16_nMax1000'
-        args.dummy = 1  # dummy data
-        args.n_iter_val = 2
-        if get_user() == 'fbaradel':
-            args.n_iters_per_epoch = 1000
-            args.train_batch_size = 16
 
     # Data
     print(f"\nLoading data...")
-    loader_train, loader_val = get_data_loaders(args)
-    args.type = loader_train.dataset.type
+    #loader_train, loader_val = get_data_loaders(args)
+    #args.type = loader_train.dataset.type
 
-    known_datadirs_to_classifier = {'babel': args.classif_ckpt_babel}
-    matching = [k for k in known_datadirs_to_classifier.keys() if k in loader_train.dataset.data_dir]
-    args.dataset_type = matching[0] if len(matching) else 'unknown'
-    if args.classif_ckpt is None:
-        assert len(matching) == 1, "Unknow data dir, provide classif_ckpt manually"
-        args.classif_ckpt = known_datadirs_to_classifier[args.dataset_type]
+    #known_datadirs_to_classifier = {'babel': args.classif_ckpt_babel}
+    #matching = [k for k in known_datadirs_to_classifier.keys() if k in loader_train.dataset.data_dir]
+    #args.dataset_type = matching[0] if len(matching) else 'unknown'
+    #if args.classif_ckpt is None:
+    #    assert len(matching) == 1, "Unknow data dir, provide classif_ckpt manually"
+    #    args.classif_ckpt = known_datadirs_to_classifier[args.dataset_type]
 
-    print(f"Data - N_train={len(loader_train.dataset.pose)} - N_val={len(loader_val.dataset.pose)}")
+    #print(f"Data - N_train={len(loader_train.dataset.pose)} - N_val={len(loader_val.dataset.pose)}")
+    #########Start my dataloader#############
 
+
+    kwargs={"action_taxonomy_to_use": "fine", "max_samples":-1}#,"e4"]}
+    train_dataset= get_dataset.get_dataset_motion(args.train_datasets,
+                                list_splits=args.train_splits,          
+                                list_view_ids=[-1 for i in range(len(args.train_splits))],
+                                dataset_folder=args.dataset_folder,
+                                use_same_action=False,
+                                ntokens_per_clip=args.seq_len,
+                                spacing=1,
+                                nclips=1,
+                                is_shifting_window=False,
+                                min_window_sec=0.,#(args.ntokens_per_clip*args.spacing/30.)*2,
+                                dict_is_aug={"aug_obsv_len":False},
+                                **kwargs,)
+        
+    loader_train=get_dataset.DataLoaderX(train_dataset,
+                                    batch_size=args.train_batch_size,
+                                    shuffle=True,
+                                    num_workers=args.prefetch_factor,
+                                    pin_memory=False,#True,
+                                    drop_last=True,
+                                    collate_fn= collate_fn,)
+                                    
+    val_dataset = get_dataset.get_dataset_motion(args.val_datasets,
+                            list_splits=args.val_splits,   
+                            list_view_ids=[-1 for i in range(len(args.val_splits))],
+                            dataset_folder=args.dataset_folder,
+                            use_same_action=False,
+                            ntokens_per_clip=args.seq_len,#args.ntokens_per_clip,
+                            spacing=1.,#args.spacing,
+                            nclips=1,
+                            min_window_sec=0.,#(args.ntokens_per_clip*args.spacing/30.)*2,
+                            is_shifting_window=True,
+                            dict_is_aug={},
+                            **kwargs,)
+
+    loader_val = get_dataset.DataLoaderX(val_dataset,
+        batch_size=args.train_batch_size,
+        shuffle=False,
+        num_workers=args.prefetch_factor,
+        pin_memory=False,
+        drop_last=True,
+        collate_fn=collate_fn,)
+
+    #########End my dataloader################
     # Model
     print(f"\nBuilding the model...")
     print(args)
-    in_dim = ((loader_train.dataset.pose[0].size(1) // 3) - 1) * 6 + 3  # jts in 6D repr, trans in 3d coord
+    in_dim=153
+    #in_dim = ((loader_train.dataset.pose[0].size(1) // 3) - 1) * 6 + 3  # jts in 6D repr, trans in 3d coord
     model = Model(in_dim=in_dim, **vars(args)).to(device)
     model.seq_len = args.vq_seq_len
 
@@ -488,7 +689,7 @@ def main(args=None):
     print(f"\nSetting up the trainer...")
     trainer = QTrainer(model=model, optimizer=optimizer, device=device,
                        args=args, epoch=epoch, start_iter=saved_iter,
-                       best_val=bv, best_class=bc, type=loader_train.dataset.type,
+                       best_val=bv, best_class=bc, #type=loader_train.dataset.type,
                        seq_len=args.seq_len, loss_scaler=loss_scaler)
     
     if args.eval_only:

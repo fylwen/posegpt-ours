@@ -7,8 +7,8 @@ import pytorch3d.utils
 import pytorch3d.renderer
 import numpy as np
 import pickle
-from human_body_prior.tools.omni_tools import copy2cpu as c2c
-from human_body_prior.body_model.body_model import BodyModel
+#from human_body_prior.tools.omni_tools import copy2cpu as c2c
+#from human_body_prior.body_model.body_model import BodyModel
 from PIL import Image, ImageDraw, ImageFont
 from torchvision import transforms
 from utils.constants import FOCAL_LENGTH, IMG_SIZE
