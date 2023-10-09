@@ -133,6 +133,7 @@ class Trainer():
 
         save_dict.update(extra_dict)
         torch.save(save_dict, os.path.join(self.args.ckpt_dir, tag + ".pt"))
+        print("save to", os.path.join(self.args.ckpt_dir, tag + ".pt"))
 
     @staticmethod
     def add_trainer_specific_args(parent_parser):

@@ -3,7 +3,7 @@
 
 from argparse import ArgumentParser
 from functools import partial
-import sys
+import sys,os
 import time
 import warnings
 
@@ -78,8 +78,7 @@ class QTrainer(Trainer):
         self.hand_scaling_factor=10
         self.pose_loss=torch_f.l1_loss
 
-    def get_gt_inputs_feature(self,batch_flatten,verbose=False):   
-        verbose=True
+    def get_gt_inputs_feature(self,batch_flatten,verbose=False):
         return_batch={}
         for key in ["valid_frame","hand_size_left","hand_size_right"]:
             return_batch[key]=batch_flatten[key].cuda()
@@ -176,7 +175,7 @@ class QTrainer(Trainer):
 
     def forward_one_batch(self, batch_flatten, loss_type,training=True,verbose=False):
         # Forward model
-        batch0=self.get_gt_inputs_feature(batch_flatten)
+        batch0=self.get_gt_inputs_feature(batch_flatten,verbose=verbose)
 
         output_comp, loss_z, indices = self.model(batch0,verbose=verbose)
         
@@ -235,17 +234,19 @@ class QTrainer(Trainer):
         trans_info={}
         for k in ['flatten_firstclip_R_base2cam_left','flatten_firstclip_t_base2cam_left','flatten_firstclip_R_base2cam_right','flatten_firstclip_t_base2cam_right']:
             trans_info[k]=batch0[k]       
-        verbose=True
+
+        compute_local2base=False
         total_loss,results_hand,loss_hand=self.compute_hand_loss(batch_seq_comp_gt=batch0["batch_seq_hand_comp_gt"], 
                                                             batch_seq_comp_out=output_comp, 
                                                             batch_seq_valid_features=batch0["batch_seq_valid_features"], 
-                                                            compute_local2base=verbose,
+                                                            compute_local2base=compute_local2base,
                                                             batch_mean_hand_size=(batch_mean_hand_left_size,batch_mean_hand_right_size),
                                                             trans_info=trans_info,
-                                                            normalize_size_from_comp=False,verbose=True)
+                                                            normalize_size_from_comp=False,verbose=verbose)
 
-        if verbose:
-            results={}
+        
+        results={}
+        if compute_local2base:
             for k in ["base","local","cam"]:
                 joints3d_out=results_hand[f"batch_seq_joints3d_in_{k}_out"]/self.hand_scaling_factor
                 results[f"batch_seq_joints3d_in_{k}_pred_out"]=joints3d_out
@@ -307,7 +308,7 @@ class QTrainer(Trainer):
 
         end = time.time()
         print(red("> Training auto-encoder..."))
-        for batch_flatten in tqdm(data):
+        for batch_idx, batch_flatten in enumerate(tqdm(data)):
             data_time.update(time.time() - end)
 
             # Input preparation
@@ -345,13 +346,14 @@ class QTrainer(Trainer):
                 average_meters.update({k: AverageMeter(k, ':6.3f') for k in statistics.keys()})
             for k in statistics.keys():
                 average_meters[k].update(statistics[k].mean())
-            self.log_train_statistics(average_meters)
             self.current_iter += 1
 
         for k, v in average_meters.items():
             if 'nll' in k or 'total' in k:
                 print(f"    - {k}: {v.avg:.3f}")
-        self.log_compute_efficiency(batch_time, data_time, max_mem)
+        
+        self.log_train_statistics(average_meters)
+        #self.log_compute_efficiency(batch_time, data_time, max_mem)
 
     def visu_rec(self, rotvec, trans_gt, outputs, valid, epoch, is_train=True):
         gt = torch.cat([rotvec.flatten(2), trans_gt], -1)
@@ -364,13 +366,13 @@ class QTrainer(Trainer):
 
     def log_train_statistics(self, average_meters):
         """ Log statistics to tensorboard and console, reset the average_meters. """
-        if not (self.current_iter % (self.args.log_freq - 1) == 0 and self.current_iter > 0):
-            return
+        #if not (self.current_iter % (self.args.log_freq - 1) == 0 and self.current_iter > 0):
+        #    return
         for k, v in average_meters.items():
-            self.writer.add_scalar(f"{k}", v.avg, self.current_iter)
+            self.writer.add_scalar(f"train/{k}", v.avg, self.current_epoch)
             v.reset()
         for k, v in self.model.log_sigmas.items():
-            self.writer.add_scalar(f"log_sigmas/{k}", v.data.detach(), self.current_iter)
+            self.writer.add_scalar(f"train/log_sigmas_{k}", v.data.detach(), self.current_epoch)
 
         # Tracking centroid usage with histograms and a score
         centroid_balance_scores = []
@@ -382,7 +384,7 @@ class QTrainer(Trainer):
                     add_histogram(writer=self.writer, tag='train_stats/z_histograms_' + k,
                                   hist=hist, global_step=self.current_iter)
                     centroid_balance_scores.append(1 - np.abs((1 - hist*hist.shape[-1])).mean())
-            self.writer.add_scalar(f"centroid_balance_score", np.mean(centroid_balance_scores), self.current_iter)
+            self.writer.add_scalar(f"train/centroid_balance_score", np.mean(centroid_balance_scores), self.current_epoch)
 
     def log_compute_efficiency(self, batch_time, data_time, max_mem):
         """ Measuring computation efficiency """
@@ -397,43 +399,50 @@ class QTrainer(Trainer):
     
     def eval(self, data, *, loss_type, epoch, save_to_tboard):
         """ Run the model on validation data; no optimization"""
-        pve, pve_wo_trans, pve_diff = [AverageMeter(k, ':6.3f') for k in ['pve', 'pve_wo_trans', 'pve_diff']]
-        average_meters = {'pve': pve, 'pve_wo_trans': pve_wo_trans, 'pve_diff': pve_diff}
+        #pve, pve_wo_trans, pve_diff = [AverageMeter(k, ':6.3f') for k in ['pve', 'pve_wo_trans', 'pve_diff']]
+        average_meters = {}#{'pve': pve, 'pve_wo_trans': pve_wo_trans, 'pve_diff': pve_diff}
 
         self.model.eval()
-        nb_visu_saved, need_more_visu = 0, True
+        #nb_visu_saved, need_more_visu = 0, True
         with torch.no_grad():
             print(red("> Evaluating auto-encoder..."))
-            for x, valid, actions in tqdm(data):
-                x, valid = x.to(self.device), valid.to(self.device)
-                x_noise, rotvec, rotmat, trans_gt, _, _ = self.preparator(x)
-                _, statistics, outputs = self.forward_one_batch(x_noise, actions, valid, loss_type,
-                                                                trans_gt, rotmat, rotvec, training=False)
-                err, err_wo_trans, verts_hat, verts = self.eval_pve(
-                    rotvec, outputs['rotmat_hat'], trans_gt, outputs['trans_hat'], valid)
+            for batch_flatten in tqdm(data):
+                total_loss, statistics, outputs = self.forward_one_batch(batch_flatten,loss_type)
 
-                # Logging
-                if len(average_meters) == 3:
+            
+                #for x, valid, actions in tqdm(data):
+                #    x, valid = x.to(self.device), valid.to(self.device)
+                #    x_noise, rotvec, rotmat, trans_gt, _, _ = self.preparator(x)
+                #    _, statistics, outputs = self.forward_one_batch(x_noise, actions, valid, loss_type,
+                #                                                    trans_gt, rotmat, rotvec, training=False)
+                #    err, err_wo_trans, verts_hat, verts = self.eval_pve(
+                #        rotvec, outputs['rotmat_hat'], trans_gt, outputs['trans_hat'], valid)
+
+                    # Logging
+                #    if len(average_meters) == 3:
+                #        average_meters.update({k: AverageMeter(k, ':6.3f') for k in statistics.keys()})
+                
+                if len(average_meters) == 0:
                     average_meters.update({k: AverageMeter(k, ':6.3f') for k in statistics.keys()})
                 for k in statistics.keys():
                     average_meters[k].update(statistics[k].mean())
-                for k, v in zip([pve, pve_wo_trans, pve_diff], [err, err_wo_trans, err - err_wo_trans]):
-                    k.update(v)
+                #    for k, v in zip([pve, pve_wo_trans, pve_diff], [err, err_wo_trans, err - err_wo_trans]):
+                #        k.update(v)
 
                 # Save visu
-                do_visu = self.args.n_visu_to_save > 0 and nb_visu_saved < self.args.n_visu_to_save and epoch % self.args.visu_freq == 0
-                if do_visu and need_more_visu:
-                    samples = None
-                    self.save_visu(verts_hat, verts, valid, samples, self.current_iter, save_to_tboard)
-                    need_more_visu = False
+                #do_visu = self.args.n_visu_to_save > 0 and nb_visu_saved < self.args.n_visu_to_save and epoch % self.args.visu_freq == 0
+                #if do_visu and need_more_visu:
+                #    samples = None
+                #    self.save_visu(verts_hat, verts, valid, samples, self.current_iter, save_to_tboard)
+                #    need_more_visu = False
 
             print(red(f"VAL:"))
             for k, v in average_meters.items():
                 print(f"    - {k}: {v.avg:.3f}")
-                self.writer.add_scalar(('val/' + k) if 'pve' not in k else ('pves/' + k), v.avg, self.current_iter)
-                if k == 'pve':
-                    self.writer.add_scalar('pve', v.avg, self.current_iter)
-        return pve.avg
+                self.writer.add_scalar(('val/' + k),v.avg,self.current_epoch)#if 'pve' not in k else ('pves/' + k), v.avg, self.current_iter)
+                #if k == 'pve':
+                #    self.writer.add_scalar('pve', v.avg, self.current_iter)
+        return #pve.avg
 
     def fit(self, data_train, data_val, *, loss='l2'):
         """
@@ -449,21 +458,21 @@ class QTrainer(Trainer):
 
             if epoch % self.args.val_freq == 0:
                 # Validate the model
-                val = self.eval(data_val, loss_type=loss,
+                self.eval(data_val, loss_type=loss,
                                 epoch=epoch,
                                 save_to_tboard=self.args.visu_to_tboard)
                 # Save ckpt
-                if val < self.best_val:
-                    self.checkpoint(tag='best_val', extra_dict={'pve': val})
-                    self.best_val = val
+                #if val < self.best_val:
+                #    self.checkpoint(tag='best_val', extra_dict={'pve': val})
+                #    self.best_val = val
 
-            if epoch % self.args.ckpt_freq == 0 and epoch > 0:
+            if epoch % self.args.ckpt_freq == 0:# and epoch > 0:
                 self.checkpoint(tag='ckpt_' + str(epoch), extra_dict={'best_val': self.best_val,
                     'best_class': self.best_class})
-            if epoch % self.args.restart_ckpt_freq == 0 and epoch > 0:
-                    # This one is saved more frequently but erases itself to save memory. Usefull for best-effort models. 
-                self.checkpoint(tag='ckpt_restart', extra_dict={'best_val': self.best_val,
-                    'best_class': self.best_class})
+            #if epoch % self.args.restart_ckpt_freq == 0 and epoch > 0:
+            #        # This one is saved more frequently but erases itself to save memory. Usefull for best-effort models. 
+            #    self.checkpoint(tag='ckpt_restart', extra_dict={'best_val': self.best_val,
+            #        'best_class': self.best_class})
             self.current_epoch += 1
         return None
 
@@ -496,7 +505,7 @@ def main(args=None):
     parser.add_argument("--dummy_data", type=int, default=0, choices=[0, 1])
     parser.add_argument("--n_iters_per_epoch", "-iter", type=int, default=5000)
     parser.add_argument("--val_freq", type=int, default=2)
-    parser.add_argument("--ckpt_freq", type=int, default=30)
+    parser.add_argument("--ckpt_freq", type=int, default=5)
     parser.add_argument("--restart_ckpt_freq", type=int, default=1)
     parser.add_argument("--log_freq", type=int, default=2000)
 
@@ -567,8 +576,6 @@ def main(args=None):
     parser.add_argument("--val_splits", default=["val"], nargs="+")
 
 
-
-
     script_args, _ = parser.parse_known_args(args)
     print("build model with",script_args.model)
     Model = {'CausalVQVAE': CausalVQVAE, 'OnlineVQVAE': OnlineVQVAE,
@@ -577,6 +584,13 @@ def main(args=None):
     parser = QTrainer.add_trainer_specific_args(parser)
     parser = Model.add_model_specific_args(parser)
     args = parser.parse_args(args)
+    
+    copy_tree("./",os.path.join(args.save_dir,args.name,'code'))
+    #cfile_name=os.path.realpath(__file__).split("/")[-1]
+    #shutil.copyfile(cfile_name,os.path.join(exp_id,cfile_name))
+
+
+
     try:
         args.factor = np.prod(args.pool_kernel) # temporal downsampling
     except:
@@ -608,7 +622,7 @@ def main(args=None):
                                 ntokens_per_clip=args.seq_len,
                                 spacing=1,
                                 nclips=1,
-                                is_shifting_window=False,
+                                is_shifting_window=True,
                                 min_window_sec=0.,#(args.ntokens_per_clip*args.spacing/30.)*2,
                                 dict_is_aug={"aug_obsv_len":False},
                                 **kwargs,)
@@ -698,7 +712,7 @@ def main(args=None):
                            save_to_tboard=args.visu_to_tboard)
         print(val)
     else:
-        trainer.writer.add_scalar('z_parameter_count', total_param, trainer.current_iter)
+        trainer.writer.add_scalar('train/z_parameter_count', total_param, trainer.current_iter)
         trainer.fit(loader_train, loader_val, loss=args.loss)
 
 if __name__ == "__main__":
