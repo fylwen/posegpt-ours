@@ -448,11 +448,11 @@ def get_data(args, user):
     for tname,tsplit,tfactor in zip(args.train_datasets,args.train_splits,args.batch_size_factors):
         factor=int(np.array(args.batch_size_factors).sum()//tfactor)
         print("**** Load training set for", tname,tsplit,factor)
-        train_dataset= get_dataset.get_dataset_motion(args.train_datasets,
-                                    list_splits=args.train_splits,          
-                                    list_view_ids=[-1 for i in range(len(args.train_splits))],
+        train_dataset= get_dataset.get_dataset_motion([tname],
+                                    list_splits=[tsplit],          
+                                    list_view_ids=[-1],
                                     dataset_folder=args.dataset_folder,
-                                    use_same_action=False,
+                                    use_same_action=True,
                                     ntokens_per_clip=args.seq_len,
                                     spacing=1,
                                     nclips=1,
@@ -478,7 +478,7 @@ def get_data(args, user):
                             list_splits=args.val_splits,   
                             list_view_ids=[-1 for i in range(len(args.val_splits))],
                             dataset_folder=args.dataset_folder,
-                            use_same_action=False,
+                            use_same_action=True,
                             ntokens_per_clip=args.seq_len,#args.ntokens_per_clip,
                             spacing=1.,#args.spacing,
                             nclips=1,
