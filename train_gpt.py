@@ -31,6 +31,25 @@ from utils.visu import visu_sample_gt_rec
 from utils.sampling import compute_fid
 from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 
+
+
+
+from meshreg.datasets import collate
+from meshreg.netscripts import reloadmodel,get_dataset
+from meshreg.models.utils import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs
+from torch.utils.data._utils.collate import default_collate
+
+from distutils.dir_util import copy_tree
+import shutil
+
+
+print('*********Sucessfully import*************')
+extend_queries = []
+def collate_fn(seq, extend_queries=extend_queries):
+    return collate.seq_extend_flatten_collate(seq,extend_queries)#seq_extend_collate(seq, extend_queries)
+
+
+
 class GTrainer(Trainer):
     """ Trainer for the generation step (training of the transformer that predicts latent variables) """
     def __init__(self, *, best_val=None, class_conditional=True, gen_eos=False, seqlen_conditional=False,
@@ -41,20 +60,87 @@ class GTrainer(Trainer):
         self.seqlen_conditional = seqlen_conditional
         self.gen_eos = gen_eos
 
-    def forward_one_batch(self, x, valid, actions, seqlens):
+        self.base_frame_id=0
+        self.hand_scaling_factor=10
+        self.pose_loss=F.l1_loss
+
+    def get_gt_inputs_feature(self,batch_flatten,verbose=False):
+        return_batch={}
+        for key in ["valid_frame","hand_size_left","hand_size_right"]:
+            return_batch[key]=batch_flatten[key].cuda()
+            
+        return_batch["batch_action_name_obsv"]=[batch_flatten["action_name"][i] for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
+        return_batch["batch_action_name_embed"]=compute_berts_for_strs(self.model.model_bert, return_batch["batch_action_name_obsv"], verbose=verbose)
+
+        flatten_comps, hand_gts = get_flatten_hand_feature(batch_flatten, 
+                                        len_seq=self.seq_len, 
+                                        spacing=1,
+                                        base_frame_id=self.base_frame_id,
+                                        factor_scaling=self.hand_scaling_factor, 
+                                        masked_placeholder=self.model.vqvae.placeholder_joints,
+                                        with_augmentation=False,#is_train,
+                                        compute_local2first=False,#True,
+                                        verbose=verbose)
+                 
+        flatten_hand_comp_gt=flatten_comps["gt"]
+        dim_hand_feature=flatten_hand_comp_gt.shape[-1]
+        
+        batch_seq_hand_comp_gt = flatten_hand_comp_gt.view(-1,self.seq_len, dim_hand_feature)
+        batch_seq_valid_features=hand_gts["flatten_valid_features"].view(-1,self.seq_len,dim_hand_feature)
+        return_batch["batch_seq_len"]=(return_batch["valid_frame"].cuda().view(-1,self.seq_len)).sum(1)
+
+        batch_seq_valid_frame=return_batch["valid_frame"].view(-1,self.seq_len,1)
+        batch_seq_valid_features=torch.mul(batch_seq_valid_features,batch_seq_valid_frame)
+        
+        return_batch["batch_seq_hand_comp_gt"]=batch_seq_hand_comp_gt
+        return_batch["batch_seq_valid_features"]=batch_seq_valid_features
+        return_batch.update(hand_gts)
+
+        if verbose:
+            for k,v in return_batch.items():
+                try:
+                    print(k,v.shape)
+                except:
+                    print(k,len(v))
+        
+        return return_batch
+
+
+    def forward_one_batch(self, batch_flatten,verbose=False):#x, valid, actions, seqlens):
+        batch0=self.get_gt_inputs_feature(batch_flatten)
+        
         """ Apply the model to a batch of data"""
         with torch.no_grad(): # auto encoder is already trained.
             self.model.vqvae.eval()
+            x=batch0["batch_seq_hand_comp_gt"]
+            valid=batch0["valid_frame"].view(-1,self.seq_len).cuda()
+            if verbose:
+                print("x/valid",x.shape,valid.shape)#[bs,seq_len,feature_dim],[bs,seq_len]
+            
             _, zidx, zvalid = self.model.vqvae.forward_latents(x, valid, return_indices=True, return_mask=True)
             target, mzi = zidx, zidx
 
         factor = x.shape[1] // mzi.shape[1]
-        actions_emb = self.model.actions_to_embeddings(actions, factor) if self.class_conditional else None
+        actions_emb = torch.unsqueeze(self.model.action_to_embedding(batch0["batch_action_name_embed"]),1)
+        #actions_to_embeddings(actions, factor) if self.class_conditional else None
+        seqlens= batch0["batch_seq_len"]
         seqlens_emb = self.model.seqlens_to_embeddings(seqlens) if self.seqlen_conditional else None
+        
+        if verbose:
+            print("actions_emb",actions_emb.shape)#[bs,1,feature_dim]
+            print("seqlens_emb",seqlens_emb.shape)#[bs,1,feature_dim]
+            print("mzi",mzi.shape)#[bs,len//2,ncodebooks]
+        
         logits = self.model.forward_gpt(mzi, actions_emb=actions_emb, seqlens_emb=seqlens_emb)
         assert logits.shape[:3] == target.shape, "Incoherent shapes, will likely be smartcasted wrong (dumbcasted)"
 
+        if verbose:
+            print("logits",logits.shape)#[bs,len//2,ncodebooks,256]
+            print("target",target.shape)#[bs,len//2,ncodebooks]
+
+
         if self.gen_eos:
+            assert False
             target_with_eos = target + 1
         else:
             # map (-1) to an arbitrary number (it will not be evaluated).
@@ -65,14 +151,16 @@ class GTrainer(Trainer):
 
         nll = nll.reshape(logits.shape[:-1])
         if not self.gen_eos:
+            if verbose:
+                print("nll/zvalid",nll.shape,zvalid.shape)#[bs,len_seq//2,ncodebooks],[bs,len_seq//2]
             nll = (nll * zvalid.unsqueeze(-1)).mean(-1).sum() / zvalid.sum()
         else:
             # TODO We should evaluate only one eos token, this gives eos too much weight.
             nll =  torch.mean(nll)
+            
         return nll, target, logits, actions_emb, seqlens_emb, target
 
     def train_n_iters(self, data):
-
         print(f"TRAIN:")
         self.model.gpt.train()
         avg_nll, data_time, batch_time = [AverageMeter(k, ':6.3f') for k in ['Nll_latents', 'data_time', 'batch_time']]
@@ -80,15 +168,16 @@ class GTrainer(Trainer):
 
         end = time.time()
         print("> Training...")
-        for x, valid, actions in tqdm(data):
+        for batch_idx, batch_flatten in enumerate(tqdm(data)):
             data_time.update(time.time() - end)
-            x, valid, actions = x.to(self.device), valid.to(self.device), actions.to(self.device)
-            x_noise, rotvec, rotmat, trans_gt, _, _ = self.preparator(x)
+            #x, valid, actions = x.to(self.device), valid.to(self.device), actions.to(self.device)
+            #x_noise, rotvec, rotmat, trans_gt, _, _ = self.preparator(x)
 
-            x_gt = torch.cat([rotmat[..., :2].flatten(2), trans_gt], -1)
-            seqlens = valid.sum(1)
+            #x_gt = torch.cat([rotmat[..., :2].flatten(2), trans_gt], -1)
+            #seqlens = valid.sum(1)
 
             if self.args.use_amp:
+                assert False
                 assert self.loss_scaler is not None
                 nll, *_ = self.forward_one_batch(x_noise, valid, actions, seqlens)
                 loss = nll
@@ -96,7 +185,7 @@ class GTrainer(Trainer):
                 self.loss_scaler(loss, self.optimizer, parameters=self.model.parameters(),
                                  update_grad=True)
             else:
-                nll, *_ = self.forward_one_batch(x_noise, valid, actions, seqlens)
+                nll, *_ = self.forward_one_batch(batch_flatten)#x_noise, valid, actions, seqlens)
                 loss = nll
                 # optimization
                 self.optimizer.zero_grad()
@@ -107,15 +196,17 @@ class GTrainer(Trainer):
             end = time.time()
             avg_nll.update(nll)
 
-            if self.current_iter % self.args.log_freq == 0 and self.current_iter > 0:
-                for k, v in nll_meters.items():
-                    self.writer.add_scalar(f"loss/{k}", v.avg, self.current_iter)
-                    v.reset()
+            #if self.current_iter % self.args.log_freq == 0 and self.current_iter > 0:
+            #    for k, v in nll_meters.items():
+            #        self.writer.add_scalar(f"loss/{k}", v.avg, self.current_iter)
+            #        v.reset()
 
             self.current_iter += 1
 
         for k, v in nll_meters.items():
             print(f"    - {k}: {v.avg:.3f}")
+            self.writer.add_scalar(f"train/loss_{k}", v.avg, self.current_epoch)
+            v.reset()
 
     def eval(self, data, *, epoch, do_save_visu=False, save_to_tboard=False, do_compute_fid=False, do_classif_eval=False):
         avg_nll, avg_acc = AverageMeter('Nll_latents', ':6.3f'), AverageMeter('Acc', ':3.2f')
@@ -126,31 +217,30 @@ class GTrainer(Trainer):
         need_more_visu = do_save_visu
         with torch.no_grad():
             print(red("> Evaluation..."))
-            for x, valid, actions in tqdm(data):
+            for batch_idx, batch_flatten in enumerate(tqdm(data)):
                 self.model.vqvae.eval()
-                x, valid, actions = x.to(self.device), valid.to(self.device), actions.to(self.device)
-                x_noise, rotvec_gt, rotmat, trans_gt, _, _ = self.preparator(x)
-                x_gt = torch.cat([rotmat[..., :2].flatten(2), trans_gt], -1)
-                seqlens = valid.sum(1)
+                #x, valid, actions = x.to(self.device), valid.to(self.device), actions.to(self.device)
+                #x_noise, rotvec_gt, rotmat, trans_gt, _, _ = self.preparator(x)
+                #x_gt = torch.cat([rotmat[..., :2].flatten(2), trans_gt], -1)
+                #seqlens = valid.sum(1)
 
-                nll, target, logits, actions_emb, seqlens_emb, zidx = self.forward_one_batch(x_noise,
-                        valid, actions, seqlens)
+                nll, target, logits, actions_emb, seqlens_emb, zidx = self.forward_one_batch(batch_flatten)#x_noise,valid, actions, seqlens)
                 avg_nll.update(nll)
 
                 target_with_eos = target + 1
-                if self.class_conditional:
-                    acc = class_accuracy(logits=logits, target_with_eos=target_with_eos)
-                    avg_acc.update(acc)
-                if do_save_visu and need_more_visu:
-                    # Visu everything in a single video
-                    need_more_visu = self.save_visu(rotvec_gt, trans_gt, zidx, actions_emb, seqlens_emb, valid,
-                                                    self.current_iter, save_to_tboard=save_to_tboard)
+                #if self.class_conditional:
+                #    acc = class_accuracy(logits=logits, target_with_eos=target_with_eos)
+                #    avg_acc.update(acc)
+                #if do_save_visu and need_more_visu:
+                #    # Visu everything in a single video
+                #    need_more_visu = self.save_visu(rotvec_gt, trans_gt, zidx, actions_emb, seqlens_emb, valid,
+                #                                    self.current_iter, save_to_tboard=save_to_tboard)
 
         print(red(f"VAL:"))
         for k, v in meters.items():
             print(f"    - {k}: {v.avg:.3f}")
-            self.writer.add_scalar('val/' + k, v.avg, self.current_iter)
-
+            self.writer.add_scalar('val/' + k, v.avg, self.current_epoch)#self.current_iter)
+        '''
         if do_compute_fid:
             compute_fid(self.model, data, self.preparator, self.device, self.args.classif_ckpt,
                     writer=self.writer, current_iter=self.current_iter, debug=self.args.debug)
@@ -162,6 +252,7 @@ class GTrainer(Trainer):
                                                   preparator=self.preparator,
                                                   data_type=self.args.dataset_type)
             self.writer.add_scalar('val/mAP_real' , mAP_reals, self.current_iter)
+        '''
 
         self.model.gpt.train()
         return avg_nll.avg
@@ -179,8 +270,8 @@ class GTrainer(Trainer):
             self.train_n_iters(data_train)
             if epoch % self.args.val_freq == 0:
                 # Validate the model
-                do_compute_fid = self.args.fid_freq > 0 and epoch % self.args.fid_freq == 0 and epoch > 0
-                do_classif_eval = self.args.class_freq > 0 and epoch % self.args.class_freq == 0 and epoch > 0
+                do_compute_fid = False#self.args.fid_freq > 0 and epoch % self.args.fid_freq == 0 and epoch > 0
+                do_classif_eval = False#self.args.class_freq > 0 and epoch % self.args.class_freq == 0 and epoch > 0
                 val = self.eval(data_val, epoch=epoch,
                                 do_save_visu=(epoch % self.args.visu_freq == 0),
                                 save_to_tboard=self.args.visu_to_tboard,
@@ -188,9 +279,9 @@ class GTrainer(Trainer):
                                 do_classif_eval = do_classif_eval)
 
                 # Save ckpt
-                if val < self.best_val:
-                    self.checkpoint(tag='best_val', extra_dict={'pve': val})
-                    self.best_val = val
+                #if val < self.best_val:
+                #    self.checkpoint(tag='best_val', extra_dict={'pve': val})
+                #    self.best_val = val
 
 
             if epoch % self.args.ckpt_freq == 0 and epoch > 1:
@@ -289,7 +380,7 @@ def get_parsers_and_models(args):
     parser.add_argument("--class_freq", type=int, default=100)
     parser.add_argument("--visu_freq", type=int, default=200)
     parser.add_argument("--visu_to_tboard", type=int, default=int(get_user() == 'tlucas'), choices=[0,1])
-    parser.add_argument("--ckpt_freq", type=int, default=50)
+    parser.add_argument("--ckpt_freq", type=int, default=10)
     parser.add_argument("--fid_freq", type=int, default=40)
     parser.add_argument("--restart_ckpt_freq", type=int, default=4)
     parser.add_argument("--log_freq", type=int, default=1000)
@@ -298,7 +389,7 @@ def get_parsers_and_models(args):
     parser.add_argument("--val_data_dir", type=str, default='data/smplx/babel_trimmed/val_60/seqLen900_fps30_overlap0_minSeqLen16')
     parser.add_argument("--n_train", type=int, default=1000000)
     parser.add_argument("--n_iter_val", type=int, default=None)
-    parser.add_argument("--save_dir", type=str, default='logs')
+    parser.add_argument("--save_dir", type=str, default='../ckpts_panda/checkpoints/posegpt')
     parser.add_argument("--name", type=str, default='debug')
     parser.add_argument("--learning_rate", "-lr", type=float, default=1e-5)
     parser.add_argument("--train_batch_size", "-b_train", type=int, default=32)
@@ -329,6 +420,18 @@ def get_parsers_and_models(args):
     parser.add_argument("--classif_ckpt", type=str, default=None)
     parser.add_argument("--classif_ckpt_babel", type=str, default='/scratch/1/user/tlucas/pose_generation/logs/publish_transformer_classif_lrx2/classification_TR/checkpoints/ckpt_fid.pt')
     parser.add_argument("--use_amp", type=int, default=0, choices=[0, 1])
+    
+
+    #dataset parameters
+    parser.add_argument('--dataset_folder',default='../')
+    
+    # Dataset params
+    parser.add_argument("--train_datasets", choices=["h2o", "ass101","asshand"], default=["ass101"],nargs="+")
+    parser.add_argument("--train_splits", default=["train"], nargs="+")
+    parser.add_argument("--val_datasets", choices=["h2o","ass101","asshand"],  default=["h2o"], nargs="+")
+    parser.add_argument("--val_splits", default=["val"], nargs="+")
+    parser.add_argument("--batch_size_factors", type=int,nargs="+")
+
 
     script_args, _ = parser.parse_known_args(args)
     assert script_args.vq_model in ['CausalVQVAE', 'OnlineVQVAE', 'OfflineVQVAE'], "Invalid VQVAE model"
@@ -340,32 +443,58 @@ def get_parsers_and_models(args):
     return parser, VQModel, Model
 
 def get_data(args, user):
-    if args.debug:
-        args.val_freq = 1
-        args.visu_freq = 1
-        args.fid_freq = 1
-        args.class_freq = 1
-        args.n_iters_per_epoch = 20
-        args.train_batch_size = 23  # Hard to confuse with an other dimension
-        args.train_data_dir = 'data/smplx/babel_trimmed/train_60/seqLen900_fps30_overlap0_minSeqLen16_nMax1000'
-        args.val_data_dir = 'data/smplx/babel_trimmed/train_60/seqLen900_fps30_overlap0_minSeqLen16_nMax1000'
-        args.n_iter_val = 2
+    train_loaders=[]
+    kwargs={"action_taxonomy_to_use": "fine", "max_samples":-1}#,"e4"]}
+    for tname,tsplit,tfactor in zip(args.train_datasets,args.train_splits,args.batch_size_factors):
+        factor=int(np.array(args.batch_size_factors).sum()//tfactor)
+        print("**** Load training set for", tname,tsplit,factor)
+        train_dataset= get_dataset.get_dataset_motion(args.train_datasets,
+                                    list_splits=args.train_splits,          
+                                    list_view_ids=[-1 for i in range(len(args.train_splits))],
+                                    dataset_folder=args.dataset_folder,
+                                    use_same_action=False,
+                                    ntokens_per_clip=args.seq_len,
+                                    spacing=1,
+                                    nclips=1,
+                                    is_shifting_window=False,
+                                    min_window_sec=16/30.*2,#(args.ntokens_per_clip*args.spacing/30.)*2,
+                                    dict_is_aug={"aug_obsv_len":True},
+                                    **kwargs,)
+            
+        ctrain_loader=get_dataset.DataLoaderX(train_dataset,
+                                        batch_size=args.train_batch_size//factor,
+                                        shuffle=True,
+                                        num_workers=args.prefetch_factor//factor,
+                                        pin_memory=False,#True,
+                                        drop_last=True,
+                                        collate_fn= collate_fn,)
+                                        
+            
+        train_loaders.append(ctrain_loader)
+    loader_train=get_dataset.ConcatLoader(train_loaders)
 
-        if not user == 'tlucas':
-            args.visu_freq = 100
-            args.n_iters_per_epoch = 2
-            args.vq_ckpt = 'logs/vqvae/debug/tb/checkpoints/best_val.pt'
-            args.n_codebook = 1
-            args.n_e = 1
-            args.n_layers = 2
-            args.depth = 2
-            args.pool_kernel = 1
 
-    # Data
-    print(f"\nLoading data...")
-    loader_train, loader_val = get_data_loaders(args)
+    val_dataset = get_dataset.get_dataset_motion(args.val_datasets,
+                            list_splits=args.val_splits,   
+                            list_view_ids=[-1 for i in range(len(args.val_splits))],
+                            dataset_folder=args.dataset_folder,
+                            use_same_action=False,
+                            ntokens_per_clip=args.seq_len,#args.ntokens_per_clip,
+                            spacing=1.,#args.spacing,
+                            nclips=1,
+                            min_window_sec=16/30.*2,#(args.ntokens_per_clip*args.spacing/30.)*2,
+                            is_shifting_window=True,
+                            dict_is_aug={},
+                            **kwargs,)
 
-    print(f"Data - N_train={len(loader_train.dataset.pose)} - N_val={len(loader_train.dataset.pose)}")
+    loader_val = get_dataset.DataLoaderX(val_dataset,
+        batch_size=args.train_batch_size,
+        shuffle=False,
+        num_workers=args.prefetch_factor,
+        pin_memory=False,
+        drop_last=True,
+        collate_fn=collate_fn,)
+
     return loader_train, loader_val
 
 
@@ -381,18 +510,22 @@ def main(args=None):
 
     loader_train, loader_val = get_data(args, user)
 
-    known_dirs_to_classifier = {'babel': args.classif_ckpt_babel}
-    matching = [k for k in known_dirs_to_classifier.keys() if k in loader_train.dataset.data_dir]
-    args.dataset_type = matching[0] if len(matching) else 'unknown'
-    if args.classif_ckpt is None:
-        assert len(matching) == 1, "Unknow data dir, provide classif_ckpt manually"
-        args.classif_ckpt = known_dirs_to_classifier[args.dataset_type]
+    #known_dirs_to_classifier = {'babel': args.classif_ckpt_babel}
+    #matching = [k for k in known_dirs_to_classifier.keys() if k in loader_train.dataset.data_dir]
+    #args.dataset_type = matching[0] if len(matching) else 'unknown'
+    
+    #if args.classif_ckpt is None:
+    #    assert len(matching) == 1, "Unknow data dir, provide classif_ckpt manually"
+    #    args.classif_ckpt = known_dirs_to_classifier[args.dataset_type]
 
 
     print(f"\nBuilding the quantization model...")
     print(args)
 
-    in_dim = ((loader_train.dataset.pose[0].size(1) // 3) - 1) * 6 + 3  # jts in 6D repr, trans in 3d coord
+    
+    copy_tree("./",os.path.join(args.save_dir,args.name,'code'))
+
+    in_dim = 153#((loader_train.dataset.pose[0].size(1) // 3) - 1) * 6 + 3  # jts in 6D repr, trans in 3d coord
     vq_model = VQModel(in_dim=in_dim, **vars(args)).to(device)
 
     assert args.vq_ckpt is not None, "You should use a pretrained VQ-VAE"
@@ -406,8 +539,7 @@ def main(args=None):
     if 'balance_stats' in vq_ckpt.keys():
         bins = vq_ckpt['balance_stats']
         vq_model.quantizer.load_state(bins)
-
-
+        
     model = Model(**vars(args), vqvae=vq_model).to(device)
 
     print("VQ model parameter count: ")
@@ -423,6 +555,7 @@ def main(args=None):
         checkpoint, ckpt_path = get_last_checkpoint(args.save_dir, args.name)
 
     if checkpoint is not None:
+        assert False
         missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         assert len(unexpected) == 0, "Unexpected keys"
         assert all(['log_sigmas' in m for m in missing]), "Missing keys: " + ','.join([m for m in missing if 'log_sigmas' not in m])
@@ -431,6 +564,7 @@ def main(args=None):
     loss_scaler = NativeScaler() if args.use_amp else None
 
     if checkpoint is not None:
+        assert False
         if not (args.eval_classif or args.eval_fid):
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         epoch, saved_iter = [checkpoint[k] for k in ['epoch', 'iter']]
@@ -447,7 +581,7 @@ def main(args=None):
     print(f"\nSetting up the trainer...")
     trainer = GTrainer(model=model, optimizer=optimizer, device=device,
                        args=args, epoch=epoch, start_iter=saved_iter,
-                       best_val=bv, type=loader_train.dataset.type,
+                       best_val=bv, 
                        class_conditional=args.class_conditional,
                        seqlen_conditional=args.seqlen_conditional,
                        gen_eos=args.gen_eos,
@@ -455,6 +589,7 @@ def main(args=None):
                        loss_scaler=loss_scaler)
 
     if args.eval_classif or args.eval_fid:
+        assert False
         data_loader = DataLoader(MocapDataset(data_dir=args.train_data_dir,
                                               seq_len=args.seq_len, training=False,
                                               n_iter=None,
