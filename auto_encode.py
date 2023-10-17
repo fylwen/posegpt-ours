@@ -139,7 +139,7 @@ class QTrainer(Trainer):
         return results
 
 
-    def compute_hand_loss(self, batch_seq_comp_gt, batch_seq_comp_out, batch_seq_valid_features, compute_local2base,
+    def compute_hand_loss(self, batch_seq_comp_gt, batch_seq_comp_out, batch_seq_valid_features, compute_local2base, batch_seq_local2base_gt,
                  batch_mean_hand_size, trans_info,normalize_size_from_comp, verbose=False):
                  
         losses={}
@@ -166,11 +166,22 @@ class QTrainer(Trainer):
                                                         normalize_size_from_comp=normalize_size_from_comp, 
                                                         batch_seq_valid_features=batch_seq_valid_features,
                                                         verbose=verbose)
+        
+        batch_seq_local2base_out=output_results["batch_seq_local2base"]
+        recov_trj_loss=self.pose_loss(batch_seq_local2base_gt,batch_seq_local2base_out,reduction='none')
+        batch_seq_trj_valid=batch_seq_valid_features[:,:,42*3:42*3+18]
+        recov_trj_loss=torch.mul(batch_seq_trj_valid,recov_trj_loss)
+        
+        cnt=torch.sum(batch_seq_trj_valid)
+        losses["recov_trj_in_base_loss"]=torch.sum(recov_trj_loss)/torch.where(cnt<1.,1.,cnt)
+        total_loss+=losses["recov_trj_in_base_loss"]
+        
         for k in output_results.keys():
             if "joints" in k:
                 results[k+"_out"]=output_results[k]
             if "batch_seq_comp_local_normalized" in k:
                 results[k]=output_results[k]
+                
         return total_loss,results,losses
 
     def forward_one_batch(self, batch_flatten, loss_type,training=True,verbose=False):
@@ -235,17 +246,19 @@ class QTrainer(Trainer):
         for k in ['flatten_firstclip_R_base2cam_left','flatten_firstclip_t_base2cam_left','flatten_firstclip_R_base2cam_right','flatten_firstclip_t_base2cam_right']:
             trans_info[k]=batch0[k]       
 
-        compute_local2base=False
+        compute_local2base=True
         total_loss,results_hand,loss_hand=self.compute_hand_loss(batch_seq_comp_gt=batch0["batch_seq_hand_comp_gt"], 
                                                             batch_seq_comp_out=output_comp, 
                                                             batch_seq_valid_features=batch0["batch_seq_valid_features"], 
                                                             compute_local2base=compute_local2base,
+                                                            batch_seq_local2base_gt=batch0['flatten_local2base_gt'].view(batch_seq_valid_frame.shape[0],batch_seq_valid_frame.shape[1],-1),
                                                             batch_mean_hand_size=(batch_mean_hand_left_size,batch_mean_hand_right_size),
                                                             trans_info=trans_info,
                                                             normalize_size_from_comp=False,verbose=verbose)
 
         
         results={}
+        '''
         if compute_local2base:
             for k in ["base","local","cam"]:
                 joints3d_out=results_hand[f"batch_seq_joints3d_in_{k}_out"]/self.hand_scaling_factor
@@ -256,6 +269,7 @@ class QTrainer(Trainer):
 
                 if verbose:
                     print(k,torch.abs(joints3d_gt-joints3d_out).max())
+        '''
 
         total_loss += self.args.alpha_codebook * loss_z['quant_loss']
         # Putting usefull statistics together (for tensorboard)
