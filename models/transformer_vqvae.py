@@ -376,10 +376,15 @@ class TransformerVQVAE(TransformerAutoEncoder):
         hid = self.post_quant_emb(z_q)
         y, valid = self.forward_decoder(z=hid, mask=valid, return_mask=True)
         batch_size, seq_len, *_ = y.size()
-        rotmat, trans = self.regressor(y)
-        rotmat = rotmat.reshape(batch_size, seq_len, -1, 3, 2)
-        rotmat = roma.special_gramschmidt(rotmat)
-        return (rotmat, trans), valid
+        #rotmat, trans = self.regressor(y)
+        #rotmat = rotmat.reshape(batch_size, seq_len, -1, 3, 2)
+        #rotmat = roma.special_gramschmidt(rotmat)
+        #print("indices",indices.shape)#[bs,seq_len//2,2]
+        #print("y",y.shape)
+        output_comp=self.regressor(y)
+        #print("output_comp",output_comp.shape)#[bs,seq_len,153]
+        #print("valid",valid.shape)#[bs,seq_len]
+        return output_comp, valid
 
     def quantize(self, z, valid=None, p=1.0,verbose=False):
         z_q, loss, indices = self.quantizer(z, p=p,verbose=verbose)

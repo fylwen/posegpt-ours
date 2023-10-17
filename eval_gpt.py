@@ -31,15 +31,14 @@ from utils.visu import visu_sample_gt_rec
 from utils.sampling import compute_fid
 from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 
-
-
-
 from meshreg.datasets import collate
 from meshreg.netscripts import reloadmodel,get_dataset
+from meshreg.netscripts.utils import sample_vis_trj_dec
 from meshreg.models.utils import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs
 from torch.utils.data._utils.collate import default_collate
 
 from distutils.dir_util import copy_tree
+from einops import repeat
 import shutil
 
 
@@ -60,7 +59,7 @@ class GTrainer(Trainer):
         self.seqlen_conditional = seqlen_conditional
         self.gen_eos = gen_eos
 
-        self.base_frame_id=0
+        self.base_frame_id=16-1
         self.hand_scaling_factor=10
         self.pose_loss=F.l1_loss
 
@@ -106,256 +105,130 @@ class GTrainer(Trainer):
         return return_batch
 
 
-    def forward_one_batch(self, batch_flatten,verbose=False):#x, valid, actions, seqlens):
-        batch0=self.get_gt_inputs_feature(batch_flatten)
+    def eval_ours(self,data, tag_out, verbose=True):
+        self.model.eval()
+        self.model.vqvae.eval()
+
+        joint_links=[(0, 2, 3, 4),
+            (0, 5, 6, 7, 8),
+            (0, 9, 10, 11, 12),
+            (0, 13, 14, 15, 16),
+            (0, 17, 18, 19, 20),]
         
-        """ Apply the model to a batch of data"""
-        with torch.no_grad(): # auto encoder is already trained.
-            self.model.vqvae.eval()
-            x=batch0["batch_seq_hand_comp_gt"]
-            valid=batch0["valid_frame"].view(-1,self.seq_len).cuda()
-            if verbose:
-                print("x/valid",x.shape,valid.shape)#[bs,seq_len,feature_dim],[bs,seq_len]
-            
-            _, zidx, zvalid = self.model.vqvae.forward_latents(x, valid, return_indices=True, return_mask=True)
-            target, mzi = zidx, zidx
 
-        factor = x.shape[1] // mzi.shape[1]
-        actions_emb = torch.unsqueeze(self.model.action_to_embedding(batch0["batch_action_name_embed"]),1)
-        #actions_to_embeddings(actions, factor) if self.class_conditional else None
-        seqlens= batch0["batch_seq_len"]
-        seqlens_emb = self.model.seqlens_to_embeddings(seqlens) if self.seqlen_conditional else None
+        for batch_idx,batch_flatten in enumerate(tqdm(data)):    
+            with torch.no_grad():
+                batch0=self.get_gt_inputs_feature(batch_flatten)
         
-        if verbose:
-            print("actions_emb",actions_emb.shape)#[bs,1,feature_dim]
-            print("seqlens_emb",seqlens_emb.shape)#[bs,1,feature_dim]
-            print("mzi",mzi.shape)#[bs,len//2,ncodebooks]
-        
-        logits = self.model.forward_gpt(mzi, actions_emb=actions_emb, seqlens_emb=seqlens_emb)
-        assert logits.shape[:3] == target.shape, "Incoherent shapes, will likely be smartcasted wrong (dumbcasted)"
+                x=batch0["batch_seq_hand_comp_gt"]
+                valid=batch0["valid_frame"].view(-1,self.seq_len).cuda()
+                if verbose:
+                    print("x/valid",x.shape,valid.shape)#[bs,seq_len,feature_dim],[bs,seq_len]
+               
+                _, zidx, zvalid = self.model.vqvae.forward_latents(x, valid, return_indices=True, return_mask=True)
 
-        if verbose:
-            print("logits",logits.shape)#[bs,len//2,ncodebooks,256]
-            print("target",target.shape)#[bs,len//2,ncodebooks]
+                actions_emb = torch.unsqueeze(self.model.action_to_embedding(batch0["batch_action_name_embed"]),1)
+                #actions_to_embeddings(actions, factor) if self.class_conditional else None
+                seqlens= batch0["batch_seq_len"]
+                seqlens_emb = self.model.seqlens_to_embeddings(seqlens) if self.seqlen_conditional else None
 
+                len_obsv=self.base_frame_id+1
+                batch_seq_comp_out,batch_seq_valid_out=self.model.sample_poses(zidx,x=x, valid=valid, 
+                                    actions_emb=actions_emb,
+                                    seqlens_emb=seqlens_emb,
+                                    temperature=None,
+                                    top_k=20,
+                                    cond_steps=len_obsv//2,
+                                    return_index_sample=False,
+                                    return_zidx=False)
+                
+                print(torch.mean(torch.abs(x[:,:16]-batch_seq_comp_out[:,:16])))
+                print(torch.mean(torch.abs(x[:,16:32]-batch_seq_comp_out[:,16:32])))
+                assert batch_seq_valid_out.all()
 
-        if self.gen_eos:
-            assert False
-            target_with_eos = target + 1
-        else:
-            # map (-1) to an arbitrary number (it will not be evaluated).
-            target_with_eos = target
-            target_with_eos[target == -1] = 0
-        nll = F.cross_entropy(logits.reshape(-1, logits.size(-1)),
-                              target_with_eos.reshape(-1), reduction='none')
+                trans_info_pred={}
+                for k in ['flatten_firstclip_R_base2cam_left',  'flatten_firstclip_t_base2cam_left', 'flatten_firstclip_R_base2cam_right', 'flatten_firstclip_t_base2cam_right']:
+                    trans_info_pred[k]=batch0[k]
+                
+                
+                batch_mean_hand_size_left=torch.mean(batch0['hand_size_left'].view(-1,self.seq_len)[:,:len_obsv],dim=1,keepdim=True)
+                batch_mean_hand_size_right=torch.mean(batch0['hand_size_right'].view(-1,self.seq_len)[:,:len_obsv],dim=1,keepdim=True)
 
-        nll = nll.reshape(logits.shape[:-1])
-        if not self.gen_eos:
-            if verbose:
-                print("nll/zvalid",nll.shape,zvalid.shape)#[bs,len_seq//2,ncodebooks],[bs,len_seq//2]
-            nll = (nll * zvalid.unsqueeze(-1)).mean(-1).sum() / zvalid.sum()
-        else:
-            # TODO We should evaluate only one eos token, this gives eos too much weight.
-            nll =  torch.mean(nll)
-            
-        return nll, target, logits, actions_emb, seqlens_emb, target
+                
+                results_hand=self.batch_seq_from_comp_to_joints(batch_seq_comp_out[:,len_obsv:],
+                                                batch_mean_hand_size=(batch_mean_hand_size_left,batch_mean_hand_size_right),
+                                                trans_info=trans_info_pred)
 
-    def train_n_iters(self, data):
-        print(f"TRAIN:")
-        self.model.gpt.train()
-        avg_nll, data_time, batch_time = [AverageMeter(k, ':6.3f') for k in ['Nll_latents', 'data_time', 'batch_time']]
-        nll_meters = {'nll': avg_nll}
+                results={}
+                for k in ["base","local","cam"]:
+                    joints3d_out=results_hand[f"batch_seq_joints3d_in_{k}"]/self.hand_scaling_factor
+                    results[f"batch_seq_joints3d_in_{k}_pred_out"]=joints3d_out
+                    
+                    joints3d_gt=batch0[f"flatten_joints3d_in_{k}_gt"].view(-1,self.seq_len,42,3)/self.hand_scaling_factor
+                    results[f"batch_seq_joints3d_in_{k}_gt"]=joints3d_gt
+                    results[f"batch_seq_joints3d_in_{k}_obsv_gt"]=joints3d_gt[:,:len_obsv]
+                    results[f"batch_seq_joints3d_in_{k}_pred_gt"]=joints3d_gt[:,len_obsv:]
 
-        end = time.time()
-        print("> Training...")
-        for batch_idx, batch_flatten in enumerate(tqdm(data)):
-            data_time.update(time.time() - end)
-            #x, valid, actions = x.to(self.device), valid.to(self.device), actions.to(self.device)
-            #x_noise, rotvec, rotmat, trans_gt, _, _ = self.preparator(x)
+                for k,v in results.items():
+                    print(k,v.shape)
+                
+                for sample_id in range(results["batch_seq_joints3d_in_cam_gt"].shape[0]):
+                    cam_info={"intr":batch_flatten["cam_intr"][0].cpu().numpy(),"extr":np.eye(4)}
 
-            #x_gt = torch.cat([rotmat[..., :2].flatten(2), trans_gt], -1)
-            #seqlens = valid.sum(1)
+                    rs_id=0
+                        
+                    sample_vis_trj_dec(batch_seq_gt_cam=results["batch_seq_joints3d_in_cam_gt"], 
+                                batch_seq_est_cam=results["batch_seq_joints3d_in_cam_pred_out"], 
+                                batch_seq_gt_local=results["batch_seq_joints3d_in_local_gt"],#results["batch_seq_joints3d_in_local_gt"],
+                                batch_seq_est_local=results["batch_seq_joints3d_in_local_pred_out"], #results["batch_seq_joints3d_in_local_out"],
+                                batch_gt_action_name=batch0["batch_action_name_obsv"], 
+                                joint_links=joint_links,  
+                                flatten_imgs=batch_flatten["image_vis"],
+                                sample_id=sample_id,
+                                cam_info=cam_info,
+                                prefix_cache_img=f"./{tag_out}/imgs/", path_video=f"./{tag_out}"+'/{:04d}_{:02d}_{:02d}.avi'.format(batch_idx,sample_id,rs_id))
+                
 
-            if self.args.use_amp:
-                assert False
-                assert self.loss_scaler is not None
-                nll, *_ = self.forward_one_batch(x_noise, valid, actions, seqlens)
-                loss = nll
-                self.optimizer.zero_grad()
-                self.loss_scaler(loss, self.optimizer, parameters=self.model.parameters(),
-                                 update_grad=True)
-            else:
-                nll, *_ = self.forward_one_batch(batch_flatten)#x_noise, valid, actions, seqlens)
-                loss = nll
-                # optimization
-                self.optimizer.zero_grad()
-                loss.backward()
+    '''
+    def fid_sample_one_batch(pose_gpt, *, x, valid, actions, device, cond_steps,
+            class_conditional, seqlen_conditional, zidx_or_bs, temperature,
+            top_k, data_loader, i, preparator):
+        """ Sample one batch from the model to evaluate fid on it.
+        Used in the inner loop of new_compute_fid"""
+        _x, _valid = x, valid
+        x, valid, actions = x.to(device), valid.to(device), actions.to(device)
+        x, *_ = preparator(x)
 
-            self.optimizer.step()
-            batch_time.update(time.time() - end)
-            end = time.time()
-            avg_nll.update(nll)
+        zidx = zidx_or_bs
+        if zidx is None or cond_steps > 0 or i == len(data_loader) - 1:
+            _, zidx = pose_gpt.vqvae.forward_latents(x, valid, return_indices=True)
 
-            #if self.current_iter % self.args.log_freq == 0 and self.current_iter > 0:
-            #    for k, v in nll_meters.items():
-            #        self.writer.add_scalar(f"loss/{k}", v.avg, self.current_iter)
-            #        v.reset()
+        seqlens = valid.sum(1)
+        (rotvec, trans), valid, idx = pose_gpt.sample_poses(zidx, actions=actions, seqlens=seqlens, x=x,
+                valid=x, temperature=temperature, top_k=top_k, cond_steps=cond_steps, return_index_sample=True)
+        sample_valid = _valid.to(device) if pose_gpt.sample_eos_force else valid
+        rotvec, trans = [repeat_last_valid(x, sample_valid) for x in [rotvec, trans]]
+        poses = torch.cat((rotvec.flatten(2), trans.flatten(2)), dim=-1)
+        return poses, sample_valid, zidx
 
-            self.current_iter += 1
+    '''
+    
+    def batch_seq_from_comp_to_joints(self, batch_seq_comp,batch_mean_hand_size,trans_info, verbose=False):
+        results={}
+        batch_size,len_seq=batch_seq_comp.shape[0],batch_seq_comp.shape[1]
+        hand_left_size=repeat(batch_mean_hand_size[0],'b ()-> b n',n=len_seq)
+        hand_right_size=repeat(batch_mean_hand_size[1],'b ()-> b n',n=len_seq)
+        flatten_mean_hand_size=[torch.flatten(hand_left_size),torch.flatten(hand_right_size)]
 
-        for k, v in nll_meters.items():
-            print(f"    - {k}: {v.avg:.3f}")
-            self.writer.add_scalar(f"train/loss_{k}", v.avg, self.current_epoch)
-            v.reset()
+        batch_seq_comp2=batch_seq_comp
 
-    def eval(self, data, *, epoch, do_save_visu=False, save_to_tboard=False, do_compute_fid=False, do_classif_eval=False):
-        avg_nll, avg_acc = AverageMeter('Nll_latents', ':6.3f'), AverageMeter('Acc', ':3.2f')
-        meters = {'nll': avg_nll, 'acc': avg_acc}
-        self.model.gpt.eval()
-        x, valid, actions, zidx = None, None, None, None
+        flatten_out=from_comp_to_joints(batch_seq_comp2, flatten_mean_hand_size, factor_scaling=self.hand_scaling_factor,trans_info=trans_info)
+        for key in ["base","cam","local"]:        
+            results[f"batch_seq_joints3d_in_{key}"]=flatten_out[f"joints_in_{key}"].view(batch_size,len_seq,42,3)
+        results["batch_seq_local2base"]=flatten_out["local2base"].view(batch_size,len_seq,flatten_out["local2base"].shape[-1])
+        results["batch_seq_trans_info"]=flatten_out["batch_seq_trans_info"]
+        return results
 
-        need_more_visu = do_save_visu
-        with torch.no_grad():
-            print(red("> Evaluation..."))
-            for batch_idx, batch_flatten in enumerate(tqdm(data)):
-                self.model.vqvae.eval()
-                #x, valid, actions = x.to(self.device), valid.to(self.device), actions.to(self.device)
-                #x_noise, rotvec_gt, rotmat, trans_gt, _, _ = self.preparator(x)
-                #x_gt = torch.cat([rotmat[..., :2].flatten(2), trans_gt], -1)
-                #seqlens = valid.sum(1)
-
-                nll, target, logits, actions_emb, seqlens_emb, zidx = self.forward_one_batch(batch_flatten)#x_noise,valid, actions, seqlens)
-                avg_nll.update(nll)
-
-                target_with_eos = target + 1
-                #if self.class_conditional:
-                #    acc = class_accuracy(logits=logits, target_with_eos=target_with_eos)
-                #    avg_acc.update(acc)
-                #if do_save_visu and need_more_visu:
-                #    # Visu everything in a single video
-                #    need_more_visu = self.save_visu(rotvec_gt, trans_gt, zidx, actions_emb, seqlens_emb, valid,
-                #                                    self.current_iter, save_to_tboard=save_to_tboard)
-
-        print(red(f"VAL:"))
-        for k, v in meters.items():
-            print(f"    - {k}: {v.avg:.3f}")
-            self.writer.add_scalar('val/' + k, v.avg, self.current_epoch)#self.current_iter)
-        '''
-        if do_compute_fid:
-            compute_fid(self.model, data, self.preparator, self.device, self.args.classif_ckpt,
-                    writer=self.writer, current_iter=self.current_iter, debug=self.args.debug)
-
-        if do_classif_eval:
-            mAP_reals = classification_evaluation(self.model, data, self.args.log_dir,
-                                                  epoch, self.args, self.args.classif_ckpt,
-                                                  while_training=True,
-                                                  preparator=self.preparator,
-                                                  data_type=self.args.dataset_type)
-            self.writer.add_scalar('val/mAP_real' , mAP_reals, self.current_iter)
-        '''
-
-        self.model.gpt.train()
-        return avg_nll.avg
-
-
-    def fit(self, data_train, data_val):
-        """
-        Train and evaluate a model using training and validation data
-        """
-        while self.current_epoch <= self.args.max_epochs:
-            epoch = self.current_epoch
-            sys.stdout.flush()
-
-            print(f"\nEPOCH={epoch:03d}/{self.args.max_epochs} - ITER={self.current_iter}")
-            self.train_n_iters(data_train)
-            if epoch % self.args.val_freq == 0:
-                # Validate the model
-                do_compute_fid = False#self.args.fid_freq > 0 and epoch % self.args.fid_freq == 0 and epoch > 0
-                do_classif_eval = False#self.args.class_freq > 0 and epoch % self.args.class_freq == 0 and epoch > 0
-                val = self.eval(data_val, epoch=epoch,
-                                do_save_visu=(epoch % self.args.visu_freq == 0),
-                                save_to_tboard=self.args.visu_to_tboard,
-                                do_compute_fid=do_compute_fid,
-                                do_classif_eval = do_classif_eval)
-
-                # Save ckpt
-                #if val < self.best_val:
-                #    self.checkpoint(tag='best_val', extra_dict={'pve': val})
-                #    self.best_val = val
-
-
-            if epoch % self.args.ckpt_freq == 0 and epoch > 1:
-                self.checkpoint(tag='ckpt_' + str(epoch), extra_dict={'best_val': self.best_val})
-
-            if epoch % self.args.restart_ckpt_freq == 0 and epoch > 1:
-                self.checkpoint(tag='ckpt_restart', extra_dict={'best_val': self.best_val})
-
-            self.current_epoch += 1
-        return None
-
-    def verts_from_indices(self, index):
-        """ Given token indices, forward the model and body model, convert to vertices. """
-        (rotmat, delta_trans), valid = self.model.forward_from_indices(index, return_valid=True, eos=-1)
-        trans = get_trans(delta_trans, valid=None)
-        rotvec = roma.rotmat_to_rotvec(rotmat)
-        verts = self.pose_to_vertices(torch.cat([rotvec.flatten(2), trans], -1))
-        return repeat_last_valid(verts, valid)
-
-    def verts_sample(self, zidx, actions_emb=None, seqlens_emb=None, temperature=None, top_k=None, cond_steps=0, return_indices=False):
-        """ Sample indices, forward propagate to vertices.
-        Args:
-            - zidx: [32, 32, 32]
-            - actions_emb: [32, 1, 512]
-            - seqlens_emb: [32, 1, 512]
-        """
-        index_sample = self.model.sample_indices(zidx, actions_emb, seqlens_emb, temperature, top_k, cond_steps)
-        verts_samples = self.verts_from_indices(index_sample)
-        if return_indices:
-            return verts_samples, index_sample
-        return verts_samples
-
-    def sample_for_visu(self, zidx, actions_emb=None, seqlens_emb=None, temperature=None, top_k=None):
-        """ Sample vertices with and without conditioning on half the sequence of tokens."""
-        # create a sample and a "half"" sample.
-        full = self.verts_sample(zidx, actions_emb=actions_emb,
-                                 seqlens_emb=seqlens_emb,
-                                 temperature=temperature, top_k=top_k,
-                                 cond_steps=0)
-        half = self.verts_sample(zidx, actions_emb=actions_emb,
-                                 seqlens_emb=seqlens_emb,
-                                 temperature=temperature, top_k=top_k,
-                                 cond_steps=zidx.shape[1] // 2)
-        return {'sample': full, 'half_sample': half}
-
-    def save_visu(self, rotvec, trans_gt, zidx, actions_emb, seqlens_emb, valid, current_iter, save_to_tboard):
-        """
-        Visu sample, half_sample, upper-bound from zid, real sample
-        """
-        visu_dir = os.path.join(self.args.log_dir, 'visu', f"{self.current_epoch:06d}")
-        os.makedirs(visu_dir, exist_ok=True)
-
-        verts = self.pose_to_vertices(torch.cat([rotvec.flatten(2), trans_gt], -1)) # GT
-        vsamples = self.sample_for_visu(zidx, actions_emb=actions_emb, seqlens_emb=seqlens_emb) # Samples
-        verts_upper_bound = self.verts_from_indices(zidx) # GT upper bound
-        verts_sample, verts_half_sample = vsamples['sample'], vsamples['half_sample']
-
-        nb_visu_saved = len(os.listdir(visu_dir))
-        err = (mm * torch.sqrt(((verts_upper_bound - verts) ** 2).sum(-1)))  # [batch_size, seq_len, vertices]
-        i = 0
-        offset = nb_visu_saved
-        while nb_visu_saved < self.args.n_visu_to_save and i < verts.size(0):
-            list_video = visu_sample_gt_rec(verts_sample[i], verts_half_sample[i], verts_upper_bound[i],
-                                            err[i], valid[i], verts[i], self.faces, self.device, visu_dir, nb_visu_saved)
-            if save_to_tboard:
-                tboard_video_format = lambda x: np.transpose(
-                    np.concatenate([np.expand_dims(a, axis=0) for a in x], axis=0), (0, 1, 4, 2, 3))
-                # vid_tensor: (N, T, C, H, W)(N,T,C,H,W). The values should lie in [0, 255] for type uint8 or [0, 1] for type float
-                self.writer.add_video('generation_' + str(offset + i), tboard_video_format(list_video),
-                                      global_step=current_iter, fps=10, walltime=None)
-
-            i += 1
-            nb_visu_saved += 1
-        return nb_visu_saved < self.args.n_visu_to_save
 
     @staticmethod
     def add_trainer_specific_args(parent_parser):
@@ -392,8 +265,7 @@ def get_parsers_and_models(args):
     parser.add_argument("--save_dir", type=str, default='../ckpts_panda/checkpoints/posegpt')
     parser.add_argument("--name", type=str, default='debug')
     parser.add_argument("--learning_rate", "-lr", type=float, default=1e-5)
-    parser.add_argument("--train_batch_size", "-b_train", type=int, default=32)
-    parser.add_argument("--val_batch_size", "-b_val", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--vq_model", type=str, default='OnlineVQVAE')
     parser.add_argument('--vq_ckpt', type=str, default=None)
     parser.add_argument("--model", type=str, default='generator.GPT_Transformer')
@@ -426,11 +298,12 @@ def get_parsers_and_models(args):
     parser.add_argument('--dataset_folder',default='../')
     
     # Dataset params
-    parser.add_argument("--train_datasets", choices=["h2o", "ass101","asshand"], default=["ass101"],nargs="+")
-    parser.add_argument("--train_splits", default=["train"], nargs="+")
-    parser.add_argument("--val_datasets", choices=["h2o","ass101","asshand"],  default=["h2o"], nargs="+")
-    parser.add_argument("--val_splits", default=["val"], nargs="+")
-    parser.add_argument("--batch_size_factors", type=int,nargs="+")
+    parser.add_argument("--val_dataset", choices=["h2o","ass101","asshand"],  default="h2o")
+    parser.add_argument("--val_split", default="val")
+    parser.add_argument("--val_view_id", default=-1, type=int)
+    parser.add_argument("--min_window_sec",type=float,default=2,help="min window length in sec to the end of video/trimmed action")
+
+
 
 
     script_args, _ = parser.parse_known_args(args)
@@ -445,21 +318,21 @@ def get_parsers_and_models(args):
 def get_data(args, user):
     kwargs={"action_taxonomy_to_use": "fine", "max_samples":-1}#,"e4"]}
 
-    val_dataset = get_dataset.get_dataset_motion(args.val_datasets,
-                            list_splits=args.val_splits,   
-                            list_view_ids=[-1 for i in range(len(args.val_splits))],
+    val_dataset = get_dataset.get_dataset_motion([args.val_dataset],
+                            list_splits=[args.val_split],   
+                            list_view_ids=[args.val_view_id],
                             dataset_folder=args.dataset_folder,
                             use_same_action=True,
-                            ntokens_per_clip=args.seq_len,#args.ntokens_per_clip,
+                            ntokens_per_clip=16,#args.seq_len,#args.ntokens_per_clip,
                             spacing=1.,#args.spacing,
-                            nclips=1,
-                            min_window_sec=16/30.*2,#(args.ntokens_per_clip*args.spacing/30.)*2,
+                            nclips=args.seq_len//16,
+                            min_window_sec=args.min_window_sec,#(args.ntokens_per_clip*args.spacing/30.)*2,
                             is_shifting_window=True,
                             dict_is_aug={},
                             **kwargs,)
 
     loader_val = get_dataset.DataLoaderX(val_dataset,
-        batch_size=args.train_batch_size,
+        batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.prefetch_factor,
         pin_memory=False,
@@ -525,6 +398,7 @@ def main(args=None):
                        gen_eos=args.gen_eos,
                        seq_len=args.seq_len, 
                        loss_scaler=None)
-    exit(0)
+    tag_out=f"vis_{args.val_dataset}_{args.val_split}_view_id{args.val_view_id}_minwindow{args.min_window_sec}_seqlen{args.seq_len}"
+    trainer.eval_ours(loader_val,tag_out)
 if __name__ == "__main__":
     main()
