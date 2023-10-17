@@ -1,2 +1,4 @@
 vis_*
-**/*.avi
+**.avi
+**.pkl
+*.pkl
