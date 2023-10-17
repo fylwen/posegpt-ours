@@ -443,36 +443,7 @@ def get_parsers_and_models(args):
     return parser, VQModel, Model
 
 def get_data(args, user):
-    train_loaders=[]
     kwargs={"action_taxonomy_to_use": "fine", "max_samples":-1}#,"e4"]}
-    for tname,tsplit,tfactor in zip(args.train_datasets,args.train_splits,args.batch_size_factors):
-        factor=int(np.array(args.batch_size_factors).sum()//tfactor)
-        print("**** Load training set for", tname,tsplit,factor)
-        train_dataset= get_dataset.get_dataset_motion([tname],
-                                    list_splits=[tsplit],          
-                                    list_view_ids=[-1],
-                                    dataset_folder=args.dataset_folder,
-                                    use_same_action=True,
-                                    ntokens_per_clip=args.seq_len,
-                                    spacing=1,
-                                    nclips=1,
-                                    is_shifting_window=False,
-                                    min_window_sec=16/30.*2,#(args.ntokens_per_clip*args.spacing/30.)*2,
-                                    dict_is_aug={"aug_obsv_len":True},
-                                    **kwargs,)
-            
-        ctrain_loader=get_dataset.DataLoaderX(train_dataset,
-                                        batch_size=args.train_batch_size//factor,
-                                        shuffle=True,
-                                        num_workers=args.prefetch_factor//factor,
-                                        pin_memory=False,#True,
-                                        drop_last=True,
-                                        collate_fn= collate_fn,)
-                                        
-            
-        train_loaders.append(ctrain_loader)
-    loader_train=get_dataset.ConcatLoader(train_loaders)
-
 
     val_dataset = get_dataset.get_dataset_motion(args.val_datasets,
                             list_splits=args.val_splits,   
@@ -495,7 +466,7 @@ def get_data(args, user):
         drop_last=True,
         collate_fn=collate_fn,)
 
-    return loader_train, loader_val
+    return loader_val
 
 
 def main(args=None):
@@ -505,30 +476,16 @@ def main(args=None):
     parser, VQModel, Model = get_parsers_and_models(args)
 
     args = parser.parse_args(args)
-    #args.factor = np.prod(args.pool_kernel) # temporal downsampling
     args.factor = 2 if isinstance(args.n_layers, int) else 2 ** len(args.n_layers)
 
-    loader_train, loader_val = get_data(args, user)
-
-    #known_dirs_to_classifier = {'babel': args.classif_ckpt_babel}
-    #matching = [k for k in known_dirs_to_classifier.keys() if k in loader_train.dataset.data_dir]
-    #args.dataset_type = matching[0] if len(matching) else 'unknown'
-    
-    #if args.classif_ckpt is None:
-    #    assert len(matching) == 1, "Unknow data dir, provide classif_ckpt manually"
-    #    args.classif_ckpt = known_dirs_to_classifier[args.dataset_type]
-
-
+    loader_val = get_data(args, user)
     print(f"\nBuilding the quantization model...")
     print(args)
-
-    
-    copy_tree("./",os.path.join(args.save_dir,args.name,'code'))
 
     in_dim = 153#((loader_train.dataset.pose[0].size(1) // 3) - 1) * 6 + 3  # jts in 6D repr, trans in 3d coord
     vq_model = VQModel(in_dim=in_dim, **vars(args)).to(device)
 
-    assert args.vq_ckpt is not None, "You should use a pretrained VQ-VAE"
+
     vq_ckpt = torch.load(args.vq_ckpt)
     weights = vq_ckpt['model_state_dict']
     weights = {k.replace('log_sigmas.verts', 'log_sigmas.vert'): v for (k, v) in weights.items()}
@@ -548,71 +505,26 @@ def main(args=None):
     print_parameters_count(model.gpt, detailed=args.detailed_count, tag='GPT - ')
 
     print(f"Number of parameters: {get_parameters(model):,}")
-    if args.pretrained_ckpt is not None:
-        checkpoint = torch.load(args.pretrained_ckpt)
-        ckpt_path = args.pretrained_ckpt
-    else:
-        checkpoint, ckpt_path = get_last_checkpoint(args.save_dir, args.name)
+    checkpoint = torch.load(args.pretrained_ckpt)
+    ckpt_path = args.pretrained_ckpt
 
-    if checkpoint is not None:
-        assert False
-        missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        assert len(unexpected) == 0, "Unexpected keys"
-        assert all(['log_sigmas' in m for m in missing]), "Missing keys: " + ','.join([m for m in missing if 'log_sigmas' not in m])
+    missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    assert len(unexpected) == 0, "Unexpected keys"
+    assert all(['log_sigmas' in m for m in missing]), "Missing keys: " + ','.join([m for m in missing if 'log_sigmas' not in m])
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-    loss_scaler = NativeScaler() if args.use_amp else None
-
-    if checkpoint is not None:
-        assert False
-        if not (args.eval_classif or args.eval_fid):
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        epoch, saved_iter = [checkpoint[k] for k in ['epoch', 'iter']]
-        bv, bc = [checkpoint[k] if k in checkpoint else None for k in ['best_val', 'best_class']]
-        print(f"Ckpt succesfully loaded from: {ckpt_path}")
-        if 'scaler' in checkpoint:
-            assert loss_scaler is not None, "I have found weights for the loss_scaler, but don't have it."
-            loss_scaler.load_state_dict(checkpoint['scaler'])
-    else:
-        epoch, saved_iter = 1, 0
-        bv, bc = None, None
+    epoch, saved_iter = 1, 0
+    bv, bc = None, None
 
     # Trainer
     print(f"\nSetting up the trainer...")
-    trainer = GTrainer(model=model, optimizer=optimizer, device=device,
+    trainer = GTrainer(model=model, optimizer=None, device=device,
                        args=args, epoch=epoch, start_iter=saved_iter,
                        best_val=bv, 
                        class_conditional=args.class_conditional,
                        seqlen_conditional=args.seqlen_conditional,
                        gen_eos=args.gen_eos,
                        seq_len=args.seq_len, 
-                       loss_scaler=loss_scaler)
-
-    if args.eval_classif or args.eval_fid:
-        assert False
-        data_loader = DataLoader(MocapDataset(data_dir=args.train_data_dir,
-                                              seq_len=args.seq_len, training=False,
-                                              n_iter=None,
-                                              n=-1,
-                                              data_augment=0,
-                                              dummy=0),
-                                 batch_size=32, num_workers=1,
-                                 prefetch_factor=2, shuffle=False,
-                                 worker_init_fn=worker_init_fn,
-                                 pin_memory=False, drop_last=True)
-        if args.eval_classif:
-            classification_evaluation(model, data_loader,
-                                      trainer.args.log_dir,
-                                      epoch, args,
-                                      args.classif_ckpt,
-                                      preparator=self.preparator,
-                                      while_training=False)
-
-        elif args.eval_fid:
-            raise NotADirectoryError("Eval only needs to be implemented")
-    else:
-        trainer.fit(loader_train, loader_val)
-
-
+                       loss_scaler=None)
+    exit(0)
 if __name__ == "__main__":
     main()

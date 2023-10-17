@@ -499,7 +499,7 @@ def main(args=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     parser = ArgumentParser()
-    parser.add_argument("--max_epochs", type=int, default=400)
+    parser.add_argument("--max_epochs", type=int, default=1000)
     #parser.add_argument("--data_device", type=str, default='cpu', choices=['cpu', 'cuda'])
     parser.add_argument("--debug", type=int, default=0, choices=[0, 1])
     parser.add_argument("--dummy_data", type=int, default=0, choices=[0, 1])
