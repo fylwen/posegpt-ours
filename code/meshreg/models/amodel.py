@@ -52,7 +52,7 @@ class ContextNet(VAE):
         self.ntokens_pred=ntokens_per_video
 
         if model_bert is None:
-            self.model_bert, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k', cache_dir="./assets/")
+            self.model_bert, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k', cache_dir="../code/assets/")
         else:
             self.model_bert=model_bert
         self.model_bert.eval()

@@ -38,8 +38,8 @@ class FIDNet(ContextNet):
         self.ntokens_per_video=ntokens_per_video
         self.spacing=spacing
 
-        self.mean_mano_palm_joints={'left': torch.from_numpy(load_mano_mean_pose('./assets/mano/MANO_{:s}.pkl'.format('LEFT'))),
-                'right': torch.from_numpy(load_mano_mean_pose('./assets/mano/MANO_{:s}.pkl'.format('RIGHT')))}
+        #self.mean_mano_palm_joints={'left': torch.from_numpy(load_mano_mean_pose('./assets/mano/MANO_{:s}.pkl'.format('LEFT'))),
+        #        'right': torch.from_numpy(load_mano_mean_pose('./assets/mano/MANO_{:s}.pkl'.format('RIGHT')))}
         
         self.num_joints=42
         self.placeholder_joints=torch.nn.Parameter(torch.randn(1,42,3))

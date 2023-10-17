@@ -21,6 +21,9 @@ from models.blocks.mingpt import Block, GPTConfig
 from models.blocks.sampling import sample_from_logits as _sample_from_logits
 from functools import partial
 
+
+import open_clip
+
 def freeze(model):
     for param in model.parameters():
         param.requires_grad = False
@@ -133,7 +136,7 @@ class GPT(nn.Module):
                           for i, x in enumerate(idx.split(1, dim=-1))], dim=-1)
         return idx
 
-    def forward(self, idx, actions_emb=None, seqlens_emb=None):
+    def forward(self, idx, actions_emb=None, seqlens_emb=None,verbose=False):
         """
         Args:
             - idx: [batch_size, seq_len, n_codebook]
@@ -147,8 +150,13 @@ class GPT(nn.Module):
         batch_size, seq_len, n_codebook = idx.size()
 
         # forward the GPT model
-        idx = self.cat_indices(idx)
-
+        if verbose:
+            print("idx/actions_embed/seqlens_embed",idx.size(),actions_emb.size(),seqlens_emb.size())
+            print("config.vocab_size",self.config.vocab_size)#512
+        idx = self.cat_indices(idx)#add also the codebook index
+        if verbose:
+            print("idx",idx.shape)#[bs,seq_len,n_codebook]
+        
         if seq_len != 0:
             token_embeddings = self.tok_emb(idx.flatten(1))  # each index maps to a (learnable) vector
             token_embeddings = token_embeddings.reshape(batch_size, seq_len, n_codebook, -1)
@@ -158,10 +166,14 @@ class GPT(nn.Module):
 
         # prepend explicit embeddings
         if actions_emb is not None and not self.embed_every_step:
+            assert False
             token_embeddings = torch.cat((actions_emb, token_embeddings), dim=1)
         else:
             token_embeddings = pad(token_embeddings)
 
+        if verbose:
+            print("token_embeddings",token_embeddings.size())#[bs,seq_len+1,dim_feature]
+            print("block_size",self.block_size)#512
         t = token_embeddings.shape[1]
         assert t <= self.block_size, "Cannot forward, model block size is exhausted."
 
@@ -175,12 +187,15 @@ class GPT(nn.Module):
         if self.concat_emb:
             x = self.fc_emb(torch.cat(list_emb, -1))
         else:
+            assert False
             x = torch.stack(list_emb, -1).sum(-1)
 
         x = self.drop(x)
         x = self.blocks(x)
         x = self.ln_f(x)
         logits = torch.stack([head(x) for head in self.list_head], 2) # [batch_size, seq_len, n_codebook, codebook_size]
+        if verbose:
+            print("logits",logits.shape)#[bs,len_seq+1,n_codebooks,codebook_size]
         return logits
 
 class poseGPT(nn.Module):
@@ -228,10 +243,17 @@ class poseGPT(nn.Module):
             self.set_autoreg_head(gpt_nembd, kwargs)
 
         n_actions = 64
-        self.set_action_embedding(n_actions, gpt_nembd, kwargs)
+        #self.set_action_embedding(n_actions, gpt_nembd, kwargs)
+        self.action_to_embedding=nn.Linear(512, gpt_nembd)
         n_seqlens = 1024
         self.set_seqlen_embedding(n_seqlens, gpt_nembd, kwargs)
         self.factor = kwargs['factor']
+
+
+        self.model_bert, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k', cache_dir="../code/assets/")
+        self.model_bert.eval()
+        for bert_p in self.model_bert.parameters():
+            bert_p.requires_grad=False
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -278,6 +300,7 @@ class poseGPT(nn.Module):
         # Cut off the last value: it has observed the full input and cannot be used.
         logits = self.gpt(indices, actions_emb, seqlens_emb)[:, :-1, ...] # bs, t, K, n_e_i
         if self.autoreg_pq:
+            assert False, "autoreg_pq"
             t = logits.shape[1]
             idx_embed = self.gpt.tok_emb(
                     self.gpt.cat_indices(indices))
@@ -297,6 +320,7 @@ class poseGPT(nn.Module):
         if self.action_emb_type == 'scratch':
             self.action_emb = nn.Embedding(n_actions, gpt_nembd)
         elif 'glove' in self.action_emb_type:
+            assert False
             if 'babel' in kwargs['train_data_dir']:
                 dataset = 'babel'
             else:
@@ -318,6 +342,7 @@ class poseGPT(nn.Module):
         if kwargs['seqlen_emb'] == 'scratch':
             self.seqlen_emb = nn.Embedding(n_seqlens, gpt_nembd)
         elif 'sine' in kwargs['seqlen_emb']:
+            assert False
             pe = torch.zeros(n_seqlens, gpt_nembd)
             position = torch.arange(0, n_seqlens, dtype=torch.float).unsqueeze(1)
             div_term = torch.exp(torch.arange(0, gpt_nembd, 2).float() * (-math.log(10000.0) / gpt_nembd))
@@ -331,7 +356,7 @@ class poseGPT(nn.Module):
     def set_autoreg_head(self, gpt_nembd, kwargs):
         """ An autoregressive head models each index in product quantization autoregressively
         on the previous ones. """
-        out_f, n_cb = n_e // kwargs['n_codebook'] + 1, kwargs['n_codebook']
+        out_f, n_cb = self.vocab_size//kwargs['n_codebook'] + 1, kwargs['n_codebook']
         get_head = {'fc_wo_bias': lambda i: nn.Linear(in_features= i * (gpt_nembd // n_cb) + (n_cb - i) * out_f, out_features=out_f),
                     'mlp': lambda i: nn.Sequential(nn.Linear(in_features=i * (gpt_nembd // n_cb) + (n_cb - i) * out_f, out_features=out_f),
                                                    nn.ReLU(), nn.Linear(out_f, out_f))
@@ -408,12 +433,14 @@ class poseGPT(nn.Module):
         """ Sample from the logits. Possibly use auto-regression on pq factors.
         Indices are incremented by 1 to account for EOS symbol. """
         if cut_to_seqlen:
+            assert False
             if indices.shape[1] > self.seq_len:
                 indices = indices[:, -self.seq_len:, ...]
 
         indices = indices + 1
         logits = self.gpt(indices, actions_emb, seqlens_emb)[:, -1, ...].unsqueeze(1) # bs, t, K, n_e_i
         if self.autoreg_pq:
+            assert False
             return self.sample_autoregressive_head(logits, sample_from_logits)
         else:
             return sample_from_logits(logits)
@@ -442,6 +469,7 @@ class poseGPT(nn.Module):
         assert not self.gpt.training
         sample_from_logits = partial(_sample_from_logits, temperature=temperature, sample=sample, top_k=top_k)
         # Iterate steps times
+        #print("z",z.shape,steps)#[bs,cond_steps,n_cb]
         for k in range(steps):
             callback(k)
             assert z.size(1) <= block_size  # make sure model can see conditioning
@@ -450,9 +478,12 @@ class poseGPT(nn.Module):
                     seqlens_emb=seqlens_emb, sample_from_logits=sample_from_logits,
                     cut_to_seqlen=cut_to_seqlen)
             # remove eos
+            #print(iz.shape)
             iz = iz - (1 if self.gen_eos else 0)
+            assert not self.gen_eos
             # append to the sequence and continue
             z = torch.cat((z, iz), dim=1)
+            #print("step",k,"z",z.shape)
         return z
 
     @torch.no_grad()
@@ -460,33 +491,47 @@ class poseGPT(nn.Module):
             cond_end=False, sample=True, cut_to_seqlen=False, steps=None):
         """ Takes the [cond_steps] first elements of zidx, samples the rest. """
         assert zidx.shape[1] >= cond_steps, "Not enough conditioning data."
-        if ward: self.gpt.eval()
-        z_cond = zidx[:, :cond_steps, ...] if not cond_end else zidx[:, -cond_steps:, ...]
+        if ward: 
+            self.gpt.eval()
+        z_cond = zidx[:, :cond_steps, ...] #if not cond_end else zidx[:, -cond_steps:, ...]
         steps = steps if steps is not None else zidx.shape[1] - z_cond.shape[1]
         index_sample = self.sample(z_cond, actions_emb=actions_emb, seqlens_emb=seqlens_emb, steps=steps,
                                     temperature=temperature if temperature is not None else 1.0,
                                     sample=sample, top_k=top_k, callback=lambda k: None,
                                     cut_to_seqlen=cut_to_seqlen)
-        if ward: self.gpt.train()
+        if ward: 
+            assert False
+            self.gpt.train()
+        
+        #print("index_sample",index_sample.shape)#[bs,len_seq//2,n_cb]
         return index_sample
 
     @torch.no_grad()
-    def sample_poses(self, zidx, x, valid, actions=None, seqlens=None, temperature=None,
+    def sample_poses(self, zidx, x, valid, actions_emb=None, seqlens_emb=None, temperature=None,
             top_k=None, cond_steps=0, return_index_sample=False, return_zidx=False):
         """ Sample indices then forward propagate the decoder and body model to get poses. """
-        actions_emb = self.actions_to_embeddings(actions, self.factor) if actions is not None else None
-        seqlens_emb = self.seqlens_to_embeddings(seqlens) if seqlens is not None else None
+        #actions_emb = self.actions_to_embeddings(actions, self.factor) if actions is not None else None
+        #seqlens_emb = self.seqlens_to_embeddings(seqlens) if seqlens is not None else None
 
-        if zidx is None or cond_steps > 0 or zidx.shape[0] != actions_emb.shape[0]:
-            _, zidx = self.vqvae.forward_latents(x, valid, return_indices=True)
+        #if zidx is None or cond_steps > 0 or zidx.shape[0] != actions_emb.shape[0]:
+        #    _, zidx = self.vqvae.forward_latents(x, valid, return_indices=True)
+
+        #print("zidx/x/valid",zidx.shape,x.shape,valid.shape)#[bs,len_seq//2,n_cb],[bs,len_seq,153],[bs,len_seq]
+        #print("actions_emb/seqlens_emb",actions_emb.shape,seqlens_emb.shape)#[bs,1,256],][bs,1,256]
 
         index_sample = self.sample_indices(zidx, actions_emb, seqlens_emb, temperature, top_k, cond_steps, ward=False)
-        (rotmat, delta_trans), valid = self.forward_from_indices(index_sample, return_valid=True, eos=-1)
-        trans = get_trans(delta_trans, valid=None)
-        rotvec = roma.rotmat_to_rotvec(rotmat)
-        out = [(rotvec, trans), valid]
-        if return_index_sample:
-            out.append(index_sample)
-        if return_zidx:
-            out.append(zidx)
-        return out
+        batch_seq_comp_out, batch_seq_valid = self.forward_from_indices(index_sample, return_valid=True, eos=-1)
+
+        #trans = get_trans(delta_trans, valid=None)
+        #rotvec = roma.rotmat_to_rotvec(rotmat)
+        
+        
+        
+        #out = [(rotvec, trans), valid]
+        #if return_index_sample:
+        #    out.append(index_sample)
+        #if return_zidx:
+        #    out.append(zidx)
+        #return out
+
+        return batch_seq_comp_out,batch_seq_valid
