@@ -671,7 +671,7 @@ def main(args=None):
     print(f"Number of parameters: {get_parameters(model):,}")
     checkpoint, ckpt_path = get_last_checkpoint(args.save_dir, args.name)
     if checkpoint is None and args.pretrained_ckpt is not None:
-        ckpt_path, reload_epoch = args.pretrained_ckpt, False
+        ckpt_path, reload_epoch = args.pretrained_ckpt, True
         checkpoint = torch.load(args.pretrained_ckpt)
 
     if checkpoint is not None:

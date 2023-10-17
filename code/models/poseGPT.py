@@ -21,6 +21,9 @@ from models.blocks.mingpt import Block, GPTConfig
 from models.blocks.sampling import sample_from_logits as _sample_from_logits
 from functools import partial
 
+
+import open_clip
+
 def freeze(model):
     for param in model.parameters():
         param.requires_grad = False
@@ -133,7 +136,7 @@ class GPT(nn.Module):
                           for i, x in enumerate(idx.split(1, dim=-1))], dim=-1)
         return idx
 
-    def forward(self, idx, actions_emb=None, seqlens_emb=None):
+    def forward(self, idx, actions_emb=None, seqlens_emb=None,verbose=False):
         """
         Args:
             - idx: [batch_size, seq_len, n_codebook]
@@ -147,8 +150,13 @@ class GPT(nn.Module):
         batch_size, seq_len, n_codebook = idx.size()
 
         # forward the GPT model
-        idx = self.cat_indices(idx)
-
+        if verbose:
+            print("idx/actions_embed/seqlens_embed",idx.size(),actions_emb.size(),seqlens_emb.size())
+            print("config.vocab_size",self.config.vocab_size)#512
+        idx = self.cat_indices(idx)#add also the codebook index
+        if verbose:
+            print("idx",idx.shape)#[bs,seq_len,n_codebook]
+        
         if seq_len != 0:
             token_embeddings = self.tok_emb(idx.flatten(1))  # each index maps to a (learnable) vector
             token_embeddings = token_embeddings.reshape(batch_size, seq_len, n_codebook, -1)
@@ -158,10 +166,14 @@ class GPT(nn.Module):
 
         # prepend explicit embeddings
         if actions_emb is not None and not self.embed_every_step:
+            assert False
             token_embeddings = torch.cat((actions_emb, token_embeddings), dim=1)
         else:
             token_embeddings = pad(token_embeddings)
 
+        if verbose:
+            print("token_embeddings",token_embeddings.size())#[bs,seq_len+1,dim_feature]
+            print("block_size",self.block_size)#512
         t = token_embeddings.shape[1]
         assert t <= self.block_size, "Cannot forward, model block size is exhausted."
 
@@ -175,12 +187,15 @@ class GPT(nn.Module):
         if self.concat_emb:
             x = self.fc_emb(torch.cat(list_emb, -1))
         else:
+            assert False
             x = torch.stack(list_emb, -1).sum(-1)
 
         x = self.drop(x)
         x = self.blocks(x)
         x = self.ln_f(x)
         logits = torch.stack([head(x) for head in self.list_head], 2) # [batch_size, seq_len, n_codebook, codebook_size]
+        if verbose:
+            print("logits",logits.shape)#[bs,len_seq+1,n_codebooks,codebook_size]
         return logits
 
 class poseGPT(nn.Module):
@@ -228,10 +243,17 @@ class poseGPT(nn.Module):
             self.set_autoreg_head(gpt_nembd, kwargs)
 
         n_actions = 64
-        self.set_action_embedding(n_actions, gpt_nembd, kwargs)
+        #self.set_action_embedding(n_actions, gpt_nembd, kwargs)
+        self.action_to_embedding=nn.Linear(512, gpt_nembd)
         n_seqlens = 1024
         self.set_seqlen_embedding(n_seqlens, gpt_nembd, kwargs)
         self.factor = kwargs['factor']
+
+
+        self.model_bert, _, _ = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k', cache_dir="../code/assets/")
+        self.model_bert.eval()
+        for bert_p in self.model_bert.parameters():
+            bert_p.requires_grad=False
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -278,6 +300,7 @@ class poseGPT(nn.Module):
         # Cut off the last value: it has observed the full input and cannot be used.
         logits = self.gpt(indices, actions_emb, seqlens_emb)[:, :-1, ...] # bs, t, K, n_e_i
         if self.autoreg_pq:
+            assert False, "autoreg_pq"
             t = logits.shape[1]
             idx_embed = self.gpt.tok_emb(
                     self.gpt.cat_indices(indices))
@@ -297,6 +320,7 @@ class poseGPT(nn.Module):
         if self.action_emb_type == 'scratch':
             self.action_emb = nn.Embedding(n_actions, gpt_nembd)
         elif 'glove' in self.action_emb_type:
+            assert False
             if 'babel' in kwargs['train_data_dir']:
                 dataset = 'babel'
             else:
@@ -318,6 +342,7 @@ class poseGPT(nn.Module):
         if kwargs['seqlen_emb'] == 'scratch':
             self.seqlen_emb = nn.Embedding(n_seqlens, gpt_nembd)
         elif 'sine' in kwargs['seqlen_emb']:
+            assert False
             pe = torch.zeros(n_seqlens, gpt_nembd)
             position = torch.arange(0, n_seqlens, dtype=torch.float).unsqueeze(1)
             div_term = torch.exp(torch.arange(0, gpt_nembd, 2).float() * (-math.log(10000.0) / gpt_nembd))
