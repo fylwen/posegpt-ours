@@ -72,8 +72,11 @@ class GTrainer(Trainer):
         return_batch={}
         for key in ["valid_frame","hand_size_left","hand_size_right"]:
             return_batch[key]=batch_flatten[key].cuda()
+
             
         return_batch["batch_action_name_obsv"]=[batch_flatten["action_name"][i] for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
+        
+        return_batch["batch_action_name_obsv"]=["open milk" for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
         return_batch["batch_action_name_embed"]=compute_berts_for_strs(self.model.model_bert, return_batch["batch_action_name_obsv"], verbose=verbose)
 
         flatten_comps, hand_gts = get_flatten_hand_feature(batch_flatten, 
@@ -131,6 +134,8 @@ class GTrainer(Trainer):
         save_dict_fid={"batch_action_name_obsv":[],"batch_enc_out_global_feature":[]}
         with torch.no_grad():
             for batch_idx,batch_flatten in enumerate(tqdm(data)):    
+                if "milk" not in batch_flatten["action_name"][0]:
+                    continue
                 batch0=self.get_gt_inputs_feature(batch_flatten)
                 
                 batch_rs_seq_in_cam_pred_out=[]
@@ -189,14 +194,14 @@ class GTrainer(Trainer):
 
                     if rs_id==0:
                         batch_seq_weights=valid.view(-1,self.seq_len).float()[:,len_obsv:]
-                        feed_mymepe_evaluators_hands(evaluators_pred,results["batch_seq_joints3d_in_cam_pred_out"][:,:-1],#batch_seq_out,#results["batch_seq_joints3d_in_cam_pred_out"], 
-                                            results["batch_seq_joints3d_in_cam_pred_out"][:,1:],#batch_seq_gt,#results["batch_seq_joints3d_in_cam_pred_gt"], 
-                                            batch_seq_weights[:,1:],valid_joints=valid_joints)
+                        feed_mymepe_evaluators_hands(evaluators_pred,results["batch_seq_joints3d_in_cam_pred_out"], 
+                                            results["batch_seq_joints3d_in_cam_pred_gt"], 
+                                            batch_seq_weights,valid_joints=valid_joints)
 
 
-                        feed_mymepe_evaluators_hands(evaluators_pred_local,results["batch_seq_joints3d_in_cam_pred_gt"][:,:-1],#results["batch_seq_joints3d_in_local_pred_out"], 
-                                            results["batch_seq_joints3d_in_cam_pred_gt"][:,1:],#results["batch_seq_joints3d_in_local_pred_gt"], 
-                                        batch_seq_weights[:,1:],valid_joints=valid_joints)#[1:])
+                        feed_mymepe_evaluators_hands(evaluators_pred_local,results["batch_seq_joints3d_in_local_pred_out"], 
+                                            results["batch_seq_joints3d_in_local_pred_gt"], 
+                                        batch_seq_weights,valid_joints=valid_joints)#[1:])
 
                         batch_seq_in_cam_pred_gt=results["batch_seq_joints3d_in_cam_pred_gt"]
                         batch_seq_in_local_pred_gt=results["batch_seq_joints3d_in_local_pred_gt"]
