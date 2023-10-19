@@ -76,7 +76,7 @@ class GTrainer(Trainer):
             
         return_batch["batch_action_name_obsv"]=[batch_flatten["action_name"][i] for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
         
-        return_batch["batch_action_name_obsv"]=["open milk" for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
+        #return_batch["batch_action_name_obsv"]=["open milk" for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
         return_batch["batch_action_name_embed"]=compute_berts_for_strs(self.model.model_bert, return_batch["batch_action_name_obsv"], verbose=verbose)
 
         flatten_comps, hand_gts = get_flatten_hand_feature(batch_flatten, 
@@ -134,8 +134,6 @@ class GTrainer(Trainer):
         save_dict_fid={"batch_action_name_obsv":[],"batch_enc_out_global_feature":[]}
         with torch.no_grad():
             for batch_idx,batch_flatten in enumerate(tqdm(data)):    
-                if "milk" not in batch_flatten["action_name"][0]:
-                    continue
                 batch0=self.get_gt_inputs_feature(batch_flatten)
                 
                 batch_rs_seq_in_cam_pred_out=[]
