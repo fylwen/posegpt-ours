@@ -525,7 +525,7 @@ def main(args=None):
     
     copy_tree("./",os.path.join(args.save_dir,args.name,'code'))
 
-    in_dim = 153#((loader_train.dataset.pose[0].size(1) // 3) - 1) * 6 + 3  # jts in 6D repr, trans in 3d coord
+    in_dim = 153-12#((loader_train.dataset.pose[0].size(1) // 3) - 1) * 6 + 3  # jts in 6D repr, trans in 3d coord
     vq_model = VQModel(in_dim=in_dim, **vars(args)).to(device)
 
     assert args.vq_ckpt is not None, "You should use a pretrained VQ-VAE"

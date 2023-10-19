@@ -76,7 +76,7 @@ class GTrainer(Trainer):
             
         return_batch["batch_action_name_obsv"]=[batch_flatten["action_name"][i] for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
         
-        return_batch["batch_action_name_obsv"]=["open milk" for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
+        #return_batch["batch_action_name_obsv"]=["open milk" for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
         return_batch["batch_action_name_embed"]=compute_berts_for_strs(self.model.model_bert, return_batch["batch_action_name_obsv"], verbose=verbose)
 
         flatten_comps, hand_gts = get_flatten_hand_feature(batch_flatten, 
@@ -134,8 +134,6 @@ class GTrainer(Trainer):
         save_dict_fid={"batch_action_name_obsv":[],"batch_enc_out_global_feature":[]}
         with torch.no_grad():
             for batch_idx,batch_flatten in enumerate(tqdm(data)):    
-                if "milk" not in batch_flatten["action_name"][0]:
-                    continue
                 batch0=self.get_gt_inputs_feature(batch_flatten)
                 
                 batch_rs_seq_in_cam_pred_out=[]
@@ -330,8 +328,6 @@ class GTrainer(Trainer):
         flatten_out=from_comp_to_joints(batch_seq_comp2, flatten_mean_hand_size, factor_scaling=self.hand_scaling_factor,trans_info=trans_info)
         for key in ["base","cam","local"]:        
             results[f"batch_seq_joints3d_in_{key}"]=flatten_out[f"joints_in_{key}"].view(batch_size,len_seq,42,3)
-        results["batch_seq_local2base"]=flatten_out["local2base"].view(batch_size,len_seq,flatten_out["local2base"].shape[-1])
-        results["batch_seq_trans_info"]=flatten_out["batch_seq_trans_info"]
         return results
 
 

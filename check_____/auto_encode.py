@@ -169,7 +169,7 @@ class QTrainer(Trainer):
         
         batch_seq_local2base_out=output_results["batch_seq_local2base"]
         recov_trj_loss=self.pose_loss(batch_seq_local2base_gt,batch_seq_local2base_out,reduction='none')
-        batch_seq_trj_valid=batch_seq_valid_features[:,:,42*3:42*3+18]
+        batch_seq_trj_valid=batch_seq_valid_features[:,:,42*3:42*3+6]#18]
         recov_trj_loss=torch.mul(batch_seq_trj_valid,recov_trj_loss)
         
         cnt=torch.sum(batch_seq_trj_valid)
@@ -251,14 +251,13 @@ class QTrainer(Trainer):
                                                             batch_seq_comp_out=output_comp, 
                                                             batch_seq_valid_features=batch0["batch_seq_valid_features"], 
                                                             compute_local2base=compute_local2base,
-                                                            batch_seq_local2base_gt=batch0['flatten_local2base_gt'].view(batch_seq_valid_frame.shape[0],batch_seq_valid_frame.shape[1],-1),
+                                                            batch_seq_local2base_gt=batch0['flatten_tra_local2base_gt'].view(batch_seq_valid_frame.shape[0],batch_seq_valid_frame.shape[1],-1),
                                                             batch_mean_hand_size=(batch_mean_hand_left_size,batch_mean_hand_right_size),
                                                             trans_info=trans_info,
                                                             normalize_size_from_comp=False,verbose=verbose)
 
-        
+
         results={}
-        '''
         if compute_local2base:
             for k in ["base","local","cam"]:
                 joints3d_out=results_hand[f"batch_seq_joints3d_in_{k}_out"]/self.hand_scaling_factor
@@ -269,7 +268,6 @@ class QTrainer(Trainer):
 
                 if verbose:
                     print(k,torch.abs(joints3d_gt-joints3d_out).max())
-        '''
 
         total_loss += self.args.alpha_codebook * loss_z['quant_loss']
         # Putting usefull statistics together (for tensorboard)
@@ -674,7 +672,7 @@ def main(args=None):
     # Model
     print(f"\nBuilding the model...")
     print(args)
-    in_dim=153
+    in_dim=153-12#153
     #in_dim = ((loader_train.dataset.pose[0].size(1) // 3) - 1) * 6 + 3  # jts in 6D repr, trans in 3d coord
     model = Model(in_dim=in_dim, **vars(args)).to(device)
     model.seq_len = args.vq_seq_len
