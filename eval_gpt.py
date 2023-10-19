@@ -328,8 +328,6 @@ class GTrainer(Trainer):
         flatten_out=from_comp_to_joints(batch_seq_comp2, flatten_mean_hand_size, factor_scaling=self.hand_scaling_factor,trans_info=trans_info)
         for key in ["base","cam","local"]:        
             results[f"batch_seq_joints3d_in_{key}"]=flatten_out[f"joints_in_{key}"].view(batch_size,len_seq,42,3)
-        results["batch_seq_local2base"]=flatten_out["local2base"].view(batch_size,len_seq,flatten_out["local2base"].shape[-1])
-        results["batch_seq_trans_info"]=flatten_out["batch_seq_trans_info"]
         return results
 
 
