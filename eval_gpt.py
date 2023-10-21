@@ -138,7 +138,7 @@ class GTrainer(Trainer):
                 
                 batch_rs_seq_in_cam_pred_out=[]
                 batch_rs_seq_in_local_pred_out=[]
-                for rs_id in range(21):
+                for rs_id in range(1):
                     x=batch0["batch_seq_hand_comp_gt"]
                     valid=batch0["valid_frame"].view(-1,self.seq_len).cuda()
 
@@ -173,7 +173,7 @@ class GTrainer(Trainer):
                     batch_mean_hand_size_right=torch.mean(batch0['hand_size_right'].view(-1,self.seq_len)[:,:len_obsv],dim=1,keepdim=True)
 
                     
-                    results_hand=self.batch_seq_from_comp_to_joints(batch_seq_comp_out[:,len_obsv:],
+                    results_hand=self.batch_seq_from_comp_to_joints(batch_seq_comp_out[:,len_obsv:],#batch0["batch_seq_hand_comp_gt"][:,len_obsv:],#
                                                     batch_mean_hand_size=(batch_mean_hand_size_left,batch_mean_hand_size_right),
                                                     trans_info=trans_info_pred)
 
@@ -204,7 +204,7 @@ class GTrainer(Trainer):
                         batch_seq_in_cam_pred_gt=results["batch_seq_joints3d_in_cam_pred_gt"]
                         batch_seq_in_local_pred_gt=results["batch_seq_joints3d_in_local_pred_gt"]
                                         
-
+                                        
                     if model_fid is not None:
                         num_frames_to_pad=results["batch_seq_joints3d_in_cam_gt"].shape[1]-results["batch_seq_joints3d_in_cam_pred_out"].shape[1]
                         batch_seq_joints3d_in_cam_for_fid=torch.cat([results["batch_seq_joints3d_in_cam_gt"][:,:num_frames_to_pad],results["batch_seq_joints3d_in_cam_pred_out"]],dim=1)

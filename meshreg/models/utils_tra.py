@@ -260,7 +260,6 @@ def augment_hand_pose_2_5D(flatten_resnet25d):
 
 
 def get_flatten_hand_feature(batch_flatten, len_seq,spacing, base_frame_id,  factor_scaling,  masked_placeholder, with_augmentation,  compute_local2first, verbose=False):
-    #assert base_frame_id is None or base_frame_id==0
     list_flatten_j3d_cam=[]
     list_flatten_j3d_local, list_flatten_j3d_local_normed, list_flatten_j3d_local_aug=[],[],[]
     list_flatten_j3d_base=[]
