@@ -217,22 +217,21 @@ def compute_flatten_local2base_info(R_cam2local,t_cam2local,base_frame_id,len_se
     return results
 
 
-def accumulate_flatten_local2base(flatten_Rt_vel,len_out,bs=-1,dim_rot=6):
-    R_vel=rotation_6d_to_matrix(flatten_Rt_vel[:,:dim_rot]).view(bs,len_out,3,3)
-    t_vel=flatten_Rt_vel[:,dim_rot:].view(bs,len_out,1,3)
+def accumulate_flatten_local2base(flatten_t_vel,len_out,bs=-1):
+    t_vel=flatten_t_vel.view(bs,len_out,1,3)
     
-    trj_R_local2base,trj_t_local2base=R_vel[:,0:1],t_vel[:,0:1]  
+    trj_t_local2base=t_vel[:,0:1]  
     for tt in range(1,len_out):
-        R_tt,t_tt=compose_Rt_a2b(batch_R_c2a=R_vel[:,tt],batch_t_c2a=t_vel[:,tt],batch_R_c2b=trj_R_local2base[:,tt-1],batch_t_c2b=trj_t_local2base[:,tt-1],is_c2a=False)    
-        trj_R_local2base=torch.cat([trj_R_local2base,torch.unsqueeze(R_tt,1)],1)
+        t_tt=trj_t_local2base[:,tt-1]+t_vel[:,tt]
+        #R_tt,t_tt=compose_Rt_a2b(batch_R_c2a=R_vel[:,tt],batch_t_c2a=t_vel[:,tt],batch_R_c2b=trj_R_local2base[:,tt-1],batch_t_c2b=trj_t_local2base[:,tt-1],is_c2a=False)    
+        #trj_R_local2base=torch.cat([trj_R_local2base,torch.unsqueeze(R_tt,1)],1)
         trj_t_local2base=torch.cat([trj_t_local2base,torch.unsqueeze(t_tt,1)],1)
 
-    flatten_R_local2base=torch.flatten(trj_R_local2base,start_dim=0,end_dim=1)
-    return {"batch_seq_R_local2base":trj_R_local2base,
+    #flatten_R_local2base=torch.flatten(trj_R_local2base,start_dim=0,end_dim=1)
+    return {#"batch_seq_R_local2base":trj_R_local2base,
             "batch_seq_t_local2base":trj_t_local2base,
-            "flatten_R_local2base":flatten_R_local2base,
-            "flatten_t_local2base":torch.flatten(trj_t_local2base,start_dim=0,end_dim=1),
-            "flatten_R_local2base_6d":matrix_to_rotation_6d(flatten_R_local2base).view(-1,6)} 
+            #"flatten_R_local2base":flatten_R_local2base,
+            "flatten_t_local2base":torch.flatten(trj_t_local2base,start_dim=0,end_dim=1),} #"flatten_R_local2base_6d":matrix_to_rotation_6d(flatten_R_local2base).view(-1,6)} 
   
 
 def augment_rotation_translation(R,t,noise_factor_angle,noise_factor_trans,verbose=False):
@@ -261,13 +260,14 @@ def augment_hand_pose_2_5D(flatten_resnet25d):
 
 
 def get_flatten_hand_feature(batch_flatten, len_seq,spacing, base_frame_id,  factor_scaling,  masked_placeholder, with_augmentation,  compute_local2first, verbose=False):
+    #assert base_frame_id is None or base_frame_id==0
     list_flatten_j3d_cam=[]
     list_flatten_j3d_local, list_flatten_j3d_local_normed, list_flatten_j3d_local_aug=[],[],[]
     list_flatten_j3d_base=[]
     list_flatten_valid_features=[]
 
-    list_flatten_vel,list_flatten_vel_aug=[],[]
-    list_flatten_local2base, list_flatten_local2first=[],[]
+    list_flatten_vel=[]
+    list_flatten_local2base=[]
     base_frame_id= 0 if base_frame_id is None else base_frame_id
 
     noise_factor_local_joints=0.002/0.08#assume mean hand size is 8 cm
@@ -287,17 +287,26 @@ def get_flatten_hand_feature(batch_flatten, len_seq,spacing, base_frame_id,  fac
  
         #j3d in local, unit: meter*factor_scaling
         j3d_local=torch.bmm(j3d_cam,R_cam2local)+t_cam2local          
-        list_flatten_j3d_local.append(torch.flatten(j3d_local,start_dim=1))#[bs*len,63]
+        #list_flatten_j3d_local.append(torch.flatten(j3d_local,start_dim=1))#[bs*len,63]
 
         #base-related and j3d in base, unit:meter*factor_scaling
         results_base=compute_flatten_local2base_info(R_cam2local=R_cam2local,t_cam2local=t_cam2local,base_frame_id=base_frame_id,len_seq=len_seq,j3d_cam=j3d_cam,verbose=verbose)
         list_flatten_j3d_base.append(torch.flatten(results_base["j3d_base"],start_dim=1))
-        list_flatten_local2base.append(results_base["local2base"])
+        
+
+        #represent local pose as root-aligned in base frame coordinate
+        j3d_in_base=results_base["j3d_base"]
+        j3d_ra_in_base=j3d_in_base-j3d_in_base[:,0:1]
+        list_flatten_j3d_local.append(torch.flatten(j3d_ra_in_base,start_dim=1))#[bs*len,63]
+
+
+        #list_flatten_local2base.append(results_base["local2base"])
+
         for ttag in ["R","t"]:
             ttag2=ttag+"_base2cam" 
             results[f'flatten_firstclip_{ttag2}_{hand_tag}']=results_base[ttag2]
-            ttag2=ttag+"_local2base"
-            results[f'flatten_{ttag2}_{hand_tag}']=results_base[ttag2]
+            #ttag2=ttag+"_local2base"
+            #results[f'flatten_{ttag2}_{hand_tag}']=results_base[ttag2]
                 
         if verbose:
             recov_cam=torch.bmm(results_base["j3d_base"],results_base["R_base2cam"])+results_base["t_base2cam"]
@@ -316,58 +325,48 @@ def get_flatten_hand_feature(batch_flatten, len_seq,spacing, base_frame_id,  fac
             recov_r=rotation_6d_to_matrix(results_base["local2base"][:,:6])
             print('check local2base mat-6d-mat vs orimat',recov_r.shape,torch.abs(recov_r-results_base["R_local2base"]).max())
 
-        #first-related
-        if compute_local2first:
-            results_first=compute_flatten_local2base_info(R_cam2local=R_cam2local,t_cam2local=t_cam2local,base_frame_id=0,len_seq=len_seq,j3d_cam=j3d_cam,verbose=verbose)
-            list_flatten_local2first.append(results_first["local2base"])
-            for ttag in ["R","t"]:
-                results[f'flatten_firstclip_{ttag}_first2cam_{hand_tag}']=results_first[f"{ttag}_base2cam"]
         
         #then start to normalize, tra still has unit of meter*factor_scaling, but hand local pose is normalized by hand size
-        j3d_local_normed=j3d_local/(factor_scaling*batch_flatten[f'hand_size_{hand_tag}'].view(-1,1,1).cuda())
-        if with_augmentation:
-            j3d_local_aug=j3d_local_normed+torch.randn_like(j3d_local_normed)*noise_factor_local_joints
+        j3d_ra_normed=j3d_ra_in_base/(factor_scaling*batch_flatten[f'hand_size_{hand_tag}'].view(-1,1,1).cuda())
+        
         
         #add mask
         j3d_valid=batch_flatten[f'valid_joints_{hand_tag}'].cuda()
         list_flatten_valid_features.append(torch.flatten(j3d_valid,start_dim=1))#[bs*len,63]        
         if masked_placeholder is not None:
             mask_embed=masked_placeholder[:,:21] if hand_tag=="left" else masked_placeholder[:,21:]
-            j3d_local_normed_=j3d_local_normed.detach().clone().type_as(masked_placeholder)
-            j3d_local_normed =torch.where(j3d_valid>0.,j3d_local_normed_,mask_embed)
+            j3d_ra_normed_=j3d_ra_normed.detach().clone().type_as(masked_placeholder)
+            j3d_ra_normed =torch.where(j3d_valid>0.,j3d_ra_normed_,mask_embed)
             if with_augmentation:
                 j3d_local_aug_=j3d_local_aug.detach().clone().type_as(masked_placeholder)
                 j3d_local_aug=torch.where(j3d_valid>0.,j3d_local_aug_,mask_embed)   
             if verbose:
-                print("mask_embed/j3d_local_normed",mask_embed.shape,j3d_local_normed.shape)
-                print("check root joints",torch.abs(j3d_local_normed[:,0]).max()) 
-                print("check masked joints",torch.abs(mask_embed[:,1]-j3d_local_normed[:,1]).max())   
-                print("check other joints",torch.abs(j3d_local_normed[:,2:]-j3d_local_normed_[:,2:]).max())           
+                print("mask_embed/j3d_ra_normed",mask_embed.shape,j3d_ra_normed.shape)
+                print("check root joints",torch.abs(j3d_ra_normed[:,0]).max()) 
+                print("check masked joints",torch.abs(mask_embed[:,1]-j3d_ra_normed[:,1]).max())   
+                print("check other joints",torch.abs(j3d_ra_normed[:,2:]-j3d_ra_normed_[:,2:]).max())           
         
-        list_flatten_j3d_local_normed.append(torch.flatten(j3d_local_normed,start_dim=1))#[bs*len,63]
-        if with_augmentation:
-            list_flatten_j3d_local_aug.append(torch.flatten(j3d_local_aug,start_dim=1))#[bs*len,63]
+        list_flatten_j3d_local_normed.append(torch.flatten(j3d_ra_normed,start_dim=1))#[bs*len,63]
+
 
         #vel is local(t)2local(t-1), unit: meter*factor_scaling
-        R_vel, t_vel = compose_Rt_a2b(batch_R_c2a=R_cam2local[1:],batch_t_c2a=t_cam2local[1:], batch_R_c2b=R_cam2local[:-1],batch_t_c2b=t_cam2local[:-1],is_c2a=True)
+        #R_vel, t_vel = compose_Rt_a2b(batch_R_c2a=R_cam2local[1:],batch_t_c2a=t_cam2local[1:], batch_R_c2b=R_cam2local[:-1],batch_t_c2b=t_cam2local[:-1],is_c2a=True)
         #set first frame velocity
-        R_vel=torch.cat([torch.eye(3,dtype=R_vel.dtype,device=R_vel.device).view(-1,3,3),R_vel],0)
+        #R_vel=torch.cat([torch.eye(3,dtype=R_vel.dtype,device=R_vel.device).view(-1,3,3),R_vel],0)
+        t_vel=j3d_in_base[1:,0]-j3d_in_base[:-1,0]
         t_vel=torch.cat([torch.zeros_like(t_vel[0:1]),t_vel],0)
-        R_vel[0::len_seq]=torch.eye(3)
-        t_vel[0::len_seq]=0.
-        list_flatten_vel.append(torch.cat([matrix_to_rotation_6d(R_vel).view(-1,6),t_vel.view(-1,3)],1))
+        #R_vel[0::len_seq]=torch.eye(3)
+        t_vel[0::len_seq]=0.        
+        list_flatten_vel.append(t_vel.view(-1,3))
 
-        if with_augmentation:
-            R_vel_aug,t_vel_aug=augment_rotation_translation(R=R_vel,t=t_vel,noise_factor_angle=noise_factor_angle,noise_factor_trans=noise_factor_trans,verbose=verbose)
-            list_flatten_vel_aug.append(torch.cat([matrix_to_rotation_6d(R_vel_aug).view(-1,6),t_vel_aug.view(-1,3)],1)) 
-        
+        batch_seq_j3d_root_in_base=j3d_in_base.view(-1,len_seq,21,3)[:,:,0,:]
+        batch_seq_j3d_tra_in_base=batch_seq_j3d_root_in_base-batch_seq_j3d_root_in_base[:,0:1]
+        list_flatten_local2base.append(torch.flatten(batch_seq_j3d_tra_in_base,0,1))
 
     results["flatten_joints3d_in_cam_gt"]=torch.cat(list_flatten_j3d_cam,1).view(num_frames,-1,3)
     results["flatten_joints3d_in_local_gt"]=torch.cat(list_flatten_j3d_local,1).view(num_frames,-1,3)
     results["flatten_joints3d_in_base_gt"]=torch.cat(list_flatten_j3d_base,1).view(num_frames,-1,3)
-    results["flatten_local2base_gt"]=torch.cat(list_flatten_local2base,1)
-    if compute_local2first:
-        results["flatten_local2first_gt"]=torch.cat(list_flatten_local2first,1)
+    results["flatten_tra_local2base_gt"]=torch.cat(list_flatten_local2base,1)
 
     
     #local left2right, in original meter space
@@ -378,27 +377,7 @@ def get_flatten_hand_feature(batch_flatten, len_seq,spacing, base_frame_id,  fac
 
     flatten_comps={}
     flatten_comps["gt"]=torch.cat([torch.cat(list_flatten_j3d_local_normed,1),torch.cat(list_flatten_vel,1),flatten_left2right],1).float()#
-    if with_augmentation:
-        R_left2right_aug,t_left2right_aug=augment_rotation_translation(R_left2right,t_left2right_meter,noise_factor_angle=noise_factor_angle_L2R,noise_factor_trans=noise_factor_trans_L2R)
-        flatten_left2right_aug=torch.cat([matrix_to_rotation_6d(R_left2right_aug).view(-1,6),t_left2right_aug.view(-1,3)],1) 
-        flatten_comps["aug"]=torch.cat([torch.cat(list_flatten_j3d_local_aug,1),torch.cat(list_flatten_vel_aug,1),flatten_left2right_aug],1).float()#
-        if verbose:
-            print("flatten_hand_feature_aug",flatten_comps["aug"].shape)#[bs,144]
-            ssid=15
-            print("diff-L",(flatten_comps["aug"]-flatten_comps["gt"])[ssid,:63])
-            print("GT-L",flatten_comps["gt"][ssid,:63])
-            print(torch.mean(torch.abs(flatten_comps["gt"][:,:63]),dim=0))
-            print(torch.std(flatten_comps["gt"][:,:63],dim=0))
-            print("diff-R",(flatten_comps["aug"]-flatten_comps["gt"])[ssid,63:126])
-            print("GT-R",flatten_comps["gt"][ssid,63:126])            
-            print(torch.mean(torch.abs(flatten_comps["gt"][:,63:126]),dim=0))
-            print(torch.std(flatten_comps["gt"][:,63:126],dim=0))
-            print("diff-vel",(flatten_comps["aug"]-flatten_comps["gt"])[ssid,126:])
-            print("GT-vel/L2R",flatten_comps["gt"][ssid,126:])
-            print(torch.mean(torch.abs(flatten_comps["gt"][:,126:]),dim=0))
-            print(torch.std(flatten_comps["gt"][:,126:],dim=0))
 
-            
     list_flatten_valid_features.append(torch.ones_like(torch.cat(list_flatten_vel,1)))
     list_flatten_valid_features.append(torch.ones_like(flatten_left2right))
     results["flatten_valid_features"]=torch.cat(list_flatten_valid_features,1) 
@@ -413,34 +392,16 @@ def get_flatten_hand_feature(batch_flatten, len_seq,spacing, base_frame_id,  fac
         recov_base_joints3d, recov_trj=recov_comp['joints_in_base'],recov_comp['local2base']
 
         ori_base_joints3d=torch.flatten(results["flatten_joints3d_in_base_gt"].view(-1,len_seq,42,3)[:,base_frame_id+1:],0,1)#
-        ori_trj=torch.flatten(results["flatten_local2base_gt"].view(-1,len_seq,18)[:,base_frame_id+1:],0,1)#
+        ori_trj=torch.flatten(results["flatten_tra_local2base_gt"].view(-1,len_seq,6)[:,base_frame_id+1:],0,1)#
         print('check ori vs pre-post process',torch.abs(recov_base_joints3d-ori_base_joints3d).max(),torch.abs(recov_trj-ori_trj).max())
 
-
-        print('**check seq by first aligning to first frame and then converting to base frame**')
-        hand_left_size=batch_flatten["hand_size_left"]
-        hand_right_size=batch_flatten["hand_size_right"]
-        flatten_hand_size=[hand_left_size,hand_right_size] 
-            
-        recov_comp=from_comp_to_joints(flatten_comps["gt"].view(num_frames//len_seq,len_seq,-1), flatten_hand_size,factor_scaling,trans_info=results,verbose=verbose)
-        recov_inframe1_joints3d=recov_comp['joints_in_base'].view(-1,42,3) #base frame for this output is the first observed frame.
-        
-        R_frame1_2base=results['flatten_R_local2base_left'][0::len_seq].clone().view(-1,1,3,3).repeat(1,len_seq,1,1).view(-1,3,3)
-        t_frame1_2base=results['flatten_t_local2base_left'][0::len_seq].clone().view(-1,1,1,3).repeat(1,len_seq,1,1).view(-1,1,3)
-        recov_inframe1_joints3d[:,:21]=torch.bmm(recov_inframe1_joints3d[:,:21].double(),R_frame1_2base)+t_frame1_2base
-
-        R_frame1_2base=results['flatten_R_local2base_right'][0::len_seq].clone().view(-1,1,3,3).repeat(1,len_seq,1,1).view(-1,3,3)
-        t_frame1_2base=results['flatten_t_local2base_right'][0::len_seq].clone().view(-1,1,1,3).repeat(1,len_seq,1,1).view(-1,1,3)
-        recov_inframe1_joints3d[:,21:]=torch.bmm(recov_inframe1_joints3d[:,21:].double(),R_frame1_2base)+t_frame1_2base
-        ori_base_joints3d=results["flatten_joints3d_in_base_gt"].view(-1,42,3)
-        print('check ori vs pre-post process',torch.abs(recov_inframe1_joints3d-ori_base_joints3d).max())
         print('num_frames/len_seq',num_frames,num_frames//len_seq,len_seq)
 
     return flatten_comps, results
 
 
 
-def from_comp_to_joints(batch_seq_comp,flatten_hand_size, factor_scaling, trans_info=None, num_hands=2,num_joints=21,dim_joint=3,dim_rot=6,dim_tra=3,verbose=False):
+def from_comp_to_joints(batch_seq_comp,flatten_hand_size, factor_scaling, trans_info=None, num_hands=2,num_joints=21,dim_joint=3,dim_tra=3,verbose=False):
     batch_seq_comp=batch_seq_comp.double()
     
     bs,len_out=batch_seq_comp.shape[0],batch_seq_comp.shape[1]
@@ -458,22 +419,17 @@ def from_comp_to_joints(batch_seq_comp,flatten_hand_size, factor_scaling, trans_
         list_j3d_in_local.append(hand_a)
         
         #with velocity, recover global trajectory in base-frame space
-        flatten_Rt_vel=batch_seq_comp[:,:,dev+hid*(dim_rot+dim_tra):dev+(hid+1)*(dim_rot+dim_tra)].reshape(bs*len_out,dim_rot+dim_tra)
-        results_local2base=accumulate_flatten_local2base(flatten_Rt_vel=flatten_Rt_vel,len_out=len_out,bs=bs,dim_rot=dim_rot)
+        flatten_t_vel=batch_seq_comp[:,:,dev+hid*(dim_tra):dev+(hid+1)*(dim_tra)].reshape(bs*len_out,dim_tra)
+        results_local2base=accumulate_flatten_local2base(flatten_t_vel=flatten_t_vel,len_out=len_out,bs=bs)
         
-        for ttag in ["R","t"]:
-            ttag2=f"batch_seq_{ttag}_local2base"
-            to_return_trans_info[f"{ttag2}_{hand_tag}"]=results_local2base[ttag2]                
-        list_local2base.append(torch.cat([results_local2base["flatten_R_local2base_6d"],results_local2base["flatten_t_local2base"].view(-1,3)],dim=1))
+        #for ttag in ["R","t"]:
+        #    ttag2=f"batch_seq_{ttag}_local2base"
+        #    to_return_trans_info[f"{ttag2}_{hand_tag}"]=results_local2base[ttag2]                
+        list_local2base.append(results_local2base["flatten_t_local2base"].view(-1,3))
 
-        if verbose:
-            results_R=trans_info[f'flatten_R_local2base_{hand_tag}'].view(bs,-1,3,3)[:,-len_out:]
-            results_t=trans_info[f'flatten_t_local2base_{hand_tag}'].view(bs,-1,1,3)[:,-len_out:]
-            
-            print("check trjectory local2base, ori vs post-recov",torch.abs(results_R-results_local2base["batch_seq_R_local2base"]).max(), torch.abs(results_t-results_local2base["batch_seq_t_local2base"]).max()) 
 
         #recover in base frame,
-        hand_in_base=torch.bmm(hand_a,results_local2base["flatten_R_local2base"])+results_local2base["flatten_t_local2base"]
+        hand_in_base=hand_a+results_local2base["flatten_t_local2base"]
         list_j3d_in_base.append(hand_in_base)
 
         #recover in camera space    

@@ -542,6 +542,8 @@ def main(args=None):
         
     model = Model(**vars(args), vqvae=vq_model).to(device)
 
+    print(model)
+
     print("VQ model parameter count: ")
     print_parameters_count(model.vqvae, detailed=args.detailed_count, tag='VQ - ')
     print("Transformer model parameter count: ")
