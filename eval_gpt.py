@@ -34,7 +34,7 @@ from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 from meshreg.datasets import collate
 from meshreg.netscripts import reloadmodel,get_dataset
 from meshreg.netscripts.utils import sample_vis_trj_dec
-from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs
+from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs############utils_tra
 from torch.utils.data._utils.collate import default_collate
 
 from meshreg.netscripts import position_evaluator as evaluate
@@ -138,7 +138,7 @@ class GTrainer(Trainer):
                 
                 batch_rs_seq_in_cam_pred_out=[]
                 batch_rs_seq_in_local_pred_out=[]
-                for rs_id in range(1):
+                for rs_id in range(21):
                     x=batch0["batch_seq_hand_comp_gt"]
                     valid=batch0["valid_frame"].view(-1,self.seq_len).cuda()
 
@@ -173,7 +173,7 @@ class GTrainer(Trainer):
                     batch_mean_hand_size_right=torch.mean(batch0['hand_size_right'].view(-1,self.seq_len)[:,:len_obsv],dim=1,keepdim=True)
 
                     
-                    results_hand=self.batch_seq_from_comp_to_joints(batch_seq_comp_out[:,len_obsv:],#batch0["batch_seq_hand_comp_gt"][:,len_obsv:],#
+                    results_hand=self.batch_seq_from_comp_to_joints(batch_seq_comp_out[:,len_obsv:],#
                                                     batch_mean_hand_size=(batch_mean_hand_size_left,batch_mean_hand_size_right),
                                                     trans_info=trans_info_pred)
 
