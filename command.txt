@@ -1,7 +1,5 @@
 
-CUDA_VISIBLE_DEVICES=0 python auto_encode.py  --name autoencode_tratrj2 --n_codebook 2 --n_e 512 --e_dim 256 --loss l2 --model CausalVQVAE --dropout 0 --freq_vert 2 --learning_rate 5e-5 --alpha_vert 100. --ab1 0.95 --tprop_vert 0.1 --prefetch_factor 4  --alpha_codebook 1. --hid_dim 384 --alpha_codebook 0.25 --train_batch_size 64 --train_datasets h2o asshand ass101 --train_splits train train train --val_datasets h2o asshand --val_splits val val --seq_len 256 
-
---pretrained_ckpt ../ckpts_panda/checkpoints/posegpt/auto_encoder/checkpoints/ckpt_400.pt
+CUDA_VISIBLE_DEVICES=0 python auto_encode.py  --name autoencode_tratrj_cont --n_codebook 2 --n_e 512 --e_dim 256 --loss l2 --model CausalVQVAE --dropout 0 --freq_vert 2 --learning_rate 5e-5 --alpha_vert 100. --ab1 0.95 --tprop_vert 0.1 --prefetch_factor 4  --alpha_codebook 1. --hid_dim 384 --alpha_codebook 0.25 --train_batch_size 64 --train_datasets h2o asshand ass101 --train_splits train train train --val_datasets h2o asshand --val_splits val val --seq_len 256 --pretrained_ckpt ../ckpts_panda/checkpoints/posegpt/autoencode_tratrj/checkpoints/ckpt_565.pt
 
 
 

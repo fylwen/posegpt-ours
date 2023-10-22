@@ -34,7 +34,7 @@ from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 from meshreg.datasets import collate
 from meshreg.netscripts import reloadmodel,get_dataset
 from meshreg.netscripts.utils import sample_vis_trj_dec
-from meshreg.models.utils import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs
+from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs############utils_tra
 from torch.utils.data._utils.collate import default_collate
 
 from meshreg.netscripts import position_evaluator as evaluate
@@ -138,7 +138,7 @@ class GTrainer(Trainer):
                 
                 batch_rs_seq_in_cam_pred_out=[]
                 batch_rs_seq_in_local_pred_out=[]
-                for rs_id in range(1):
+                for rs_id in range(21):
                     x=batch0["batch_seq_hand_comp_gt"]
                     valid=batch0["valid_frame"].view(-1,self.seq_len).cuda()
 
@@ -173,7 +173,7 @@ class GTrainer(Trainer):
                     batch_mean_hand_size_right=torch.mean(batch0['hand_size_right'].view(-1,self.seq_len)[:,:len_obsv],dim=1,keepdim=True)
 
                     
-                    results_hand=self.batch_seq_from_comp_to_joints(batch_seq_comp_out[:,len_obsv:],
+                    results_hand=self.batch_seq_from_comp_to_joints(batch_seq_comp_out[:,len_obsv:],#
                                                     batch_mean_hand_size=(batch_mean_hand_size_left,batch_mean_hand_size_right),
                                                     trans_info=trans_info_pred)
 
@@ -204,7 +204,7 @@ class GTrainer(Trainer):
                         batch_seq_in_cam_pred_gt=results["batch_seq_joints3d_in_cam_pred_gt"]
                         batch_seq_in_local_pred_gt=results["batch_seq_joints3d_in_local_pred_gt"]
                                         
-
+                                        
                     if model_fid is not None:
                         num_frames_to_pad=results["batch_seq_joints3d_in_cam_gt"].shape[1]-results["batch_seq_joints3d_in_cam_pred_out"].shape[1]
                         batch_seq_joints3d_in_cam_for_fid=torch.cat([results["batch_seq_joints3d_in_cam_gt"][:,:num_frames_to_pad],results["batch_seq_joints3d_in_cam_pred_out"]],dim=1)
@@ -242,7 +242,7 @@ class GTrainer(Trainer):
                                         cam_info=cam_info,
                                         prefix_cache_img=f"./{tag_out}/imgs/", path_video=f"./{tag_out}"+'/{:04d}_{:02d}_{:02d}.avi'.format(batch_idx,sample_id,rs_id))
                 
-                if len(batch_rs_seq_in_cam_pred_out)>1:
+                if False and len(batch_rs_seq_in_cam_pred_out)>1:
                     batch_rs_seq_in_cam_pred_out=torch.cat(batch_rs_seq_in_cam_pred_out,dim=1)
                     batch_rs_seq_in_local_pred_out=torch.cat(batch_rs_seq_in_local_pred_out,dim=1)
                     print("batch_rs_seq_in_cam_pred_out",batch_rs_seq_in_cam_pred_out.shape)
@@ -328,8 +328,6 @@ class GTrainer(Trainer):
         flatten_out=from_comp_to_joints(batch_seq_comp2, flatten_mean_hand_size, factor_scaling=self.hand_scaling_factor,trans_info=trans_info)
         for key in ["base","cam","local"]:        
             results[f"batch_seq_joints3d_in_{key}"]=flatten_out[f"joints_in_{key}"].view(batch_size,len_seq,42,3)
-        results["batch_seq_local2base"]=flatten_out["local2base"].view(batch_size,len_seq,flatten_out["local2base"].shape[-1])
-        results["batch_seq_trans_info"]=flatten_out["batch_seq_trans_info"]
         return results
 
 
@@ -457,7 +455,7 @@ def main(args=None):
     print(f"\nBuilding the quantization model...")
     print(args)
 
-    in_dim = 153#((loader_train.dataset.pose[0].size(1) // 3) - 1) * 6 + 3  # jts in 6D repr, trans in 3d coord
+    in_dim = 153-12#((loader_train.dataset.pose[0].size(1) // 3) - 1) * 6 + 3  # jts in 6D repr, trans in 3d coord
     vq_model = VQModel(in_dim=in_dim, **vars(args)).to(device)
 
 
@@ -473,7 +471,6 @@ def main(args=None):
         vq_model.quantizer.load_state(bins)
         
     model = Model(**vars(args), vqvae=vq_model).to(device)
-
     print("VQ model parameter count: ")
     print_parameters_count(model.vqvae, detailed=args.detailed_count, tag='VQ - ')
     print("Transformer model parameter count: ")
