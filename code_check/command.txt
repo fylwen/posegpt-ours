@@ -9,18 +9,14 @@ CUDA_VISIBLE_DEVICES=0 python auto_encode.py  --name autoencode_tratrj --n_codeb
 
 
 
-CUDA_VISIBLE_DEVICES=2 python train_gpt.py  --name generator_tratrj --n_codebook 2 --n_e 512 --e_dim 256  --vq_model CausalVQVAE --hid_dim 384 --dropout 0  --vq_ckpt ../ckpts_panda/checkpoints/posegpt/autoencode_tratrj/checkpoints/ckpt_400.pt --model poseGPT --n_visu_to_save 2 --class_conditional 1 --gpt_blocksize 512 --gpt_nlayer 8 --gpt_nhead 4 --gpt_embd_pdrop 0.2 --gpt_resid_pdrop 0.2 --gpt_attn_pdrop 0.2 --seq_len 256 --gen_eos 0 --eval_fid 0 --eos_force 1 --seqlen_conditional 1 --embed_every_step 1 --concat_emb 1 --train_datasets h2o  --train_datasets h2o asshand ass101 --train_splits train train train --batch_size_factors 1 1 2 --val_datasets h2o asshand --val_splits val val
+CUDA_VISIBLE_DEVICES=2 python train_gpt.py  --name generator_tratrj565 --n_codebook 2 --n_e 512 --e_dim 256  --vq_model CausalVQVAE --hid_dim 384 --dropout 0  --vq_ckpt ../ckpts_panda/checkpoints/posegpt/autoencode_tratrj/checkpoints/ckpt_565.pt --model poseGPT --n_visu_to_save 2 --class_conditional 1 --gpt_blocksize 512 --gpt_nlayer 8 --gpt_nhead 4 --gpt_embd_pdrop 0.2 --gpt_resid_pdrop 0.2 --gpt_attn_pdrop 0.2 --seq_len 256 --gen_eos 0 --eval_fid 0 --eos_force 1 --seqlen_conditional 1 --embed_every_step 1 --concat_emb 1 --train_datasets h2o  --train_datasets h2o asshand ass101 --train_splits train train train --batch_size_factors 1 1 2 --val_datasets h2o asshand --val_splits val val
 
 
 
 
 
 
-CUDA_VISIBLE_DEVICES=3 python eval_gpt.py  --name test --n_codebook 2 --n_e 512 --e_dim 256  --vq_model CausalVQVAE --hid_dim 384 --dropout 0  --vq_ckpt ../ckpts_panda/checkpoints/posegpt/auto_encoder/checkpoints/ckpt_400.pt --model poseGPT --n_visu_to_save 2 --class_conditional 1 --gpt_blocksize 512 --gpt_nlayer 8 --gpt_nhead 4 --gpt_embd_pdrop 0. --gpt_resid_pdrop 0. --gpt_attn_pdrop 0. --gen_eos 0 --eval_fid 0 --eos_force 1 --seqlen_conditional 1 --embed_every_step 1 --concat_emb 1 --val_dataset h2o --val_split test --val_view_id 3 --min_window_sec 2. --pretrained_ckpt ../ckpts_panda/checkpoints/posegpt/generator_tratrj/checkpoints/ckpt_5.pt --batch_size 4 --seq_len 48 
-
-
-
---fid_path ../ckpts_panda/checkpoints/fidv3_bs128_9layers_256x1tokens_h2o_decay400_0_5/checkpoint_1000.pth
+CUDA_VISIBLE_DEVICES=0 python eval_gpt.py  --name test --n_codebook 2 --n_e 512 --e_dim 256  --vq_model CausalVQVAE --hid_dim 384 --dropout 0   --model poseGPT --n_visu_to_save 2 --class_conditional 1 --gpt_blocksize 512 --gpt_nlayer 8 --gpt_nhead 4 --gpt_embd_pdrop 0. --gpt_resid_pdrop 0. --gpt_attn_pdrop 0. --gen_eos 0 --eval_fid 0 --eos_force 1 --seqlen_conditional 1 --embed_every_step 1 --concat_emb 1 --val_dataset h2o --val_split test --val_view_id 3 --min_window_sec 2. --pretrained_ckpt ../ckpts_panda/checkpoints/posegpt/generator_trj/checkpoints/ckpt_65.pt --batch_size 64 --seq_len 112 --vq_ckpt ../ckpts_panda/checkpoints/posegpt/autoencode_trj/checkpoints/ckpt_400.pt --fid_path ../ckpts_panda/checkpoints/fidv3_bs128_9layers_256x1tokens_h2o_decay400_0_5/checkpoint_1000.pth
 
 
 
