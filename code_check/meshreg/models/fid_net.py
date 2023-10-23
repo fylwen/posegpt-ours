@@ -38,8 +38,8 @@ class FIDNet(ContextNet):
         self.ntokens_per_video=ntokens_per_video
         self.spacing=spacing
 
-        self.mean_mano_palm_joints={'left': torch.from_numpy(load_mano_mean_pose('../code/assets/mano/MANO_{:s}.pkl'.format('LEFT'))),
-                'right': torch.from_numpy(load_mano_mean_pose('../code/assets/mano/MANO_{:s}.pkl'.format('RIGHT')))}
+        #self.mean_mano_palm_joints={'left': torch.from_numpy(load_mano_mean_pose('./assets/mano/MANO_{:s}.pkl'.format('LEFT'))),
+        #        'right': torch.from_numpy(load_mano_mean_pose('./assets/mano/MANO_{:s}.pkl'.format('RIGHT')))}
         
         self.num_joints=42
         self.placeholder_joints=torch.nn.Parameter(torch.randn(1,42,3))
@@ -115,16 +115,14 @@ class FIDNet(ContextNet):
         for tag in ["left","right"]:
             batch_flatten_hand["cam_joints3d_"+tag]=torch.flatten(batch["batch_seq_cam_joints3d_"+tag],0,1)
             batch_flatten_hand["local_joints3d_"+tag]=torch.flatten(batch["batch_seq_local_joints3d_"+tag],0,1)
-                
-            batch_flatten_hand["hand_size_"+tag]=torch.mean(torch.norm(batch_flatten_hand["cam_joints3d_"+tag][:,palm_joints[1:]]-batch_flatten_hand["cam_joints3d_"+tag][:, root_idx:root_idx+1],p=2,dim=-1),dim=1)
-            mano_palm=self.mean_mano_palm_joints[tag].cuda() 
-            mano_palm_size=torch.mean(torch.norm(mano_palm[1:]-mano_palm[0:1],p=2,dim=-1))
-            mano_palm=torch.mul(torch.unsqueeze(mano_palm,0).repeat(batch_flatten_hand["hand_size_"+tag].shape[0],1,1),batch_flatten_hand["hand_size_"+tag].view(-1,1,1))/mano_palm_size.view(-1,1,1)
             
-            batch_flatten_hand["R_cam2local_"+tag],batch_flatten_hand["t_cam2local_"+tag]=align_a2b(batch_flatten_hand["cam_joints3d_"+tag][:,palm_joints].contiguous(),mano_palm,root_idx=root_idx)#batch_flatten_hand["local_joints3d_"+tag],root_idx=root_idx)
+            batch_flatten_hand["R_cam2local_"+tag],batch_flatten_hand["t_cam2local_"+tag]=align_a2b(batch_flatten_hand["cam_joints3d_"+tag],batch_flatten_hand["local_joints3d_"+tag],root_idx=root_idx)
 
             batch_flatten_hand["valid_joints_"+tag]=torch.ones_like(batch_flatten_hand["cam_joints3d_"+tag])
             batch_flatten_hand["valid_joints_"+tag][:,1]=0
+
+            
+            batch_flatten_hand["hand_size_"+tag]=torch.mean(torch.norm(batch_flatten_hand["cam_joints3d_"+tag][:,palm_joints[1:]]-batch_flatten_hand["cam_joints3d_"+tag][:, root_idx:root_idx+1],p=2,dim=-1),dim=1)
 
                 
         flatten_comps, hand_gts = get_flatten_hand_feature(batch_flatten_hand, 
