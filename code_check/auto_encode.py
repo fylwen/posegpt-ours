@@ -34,7 +34,7 @@ from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 
 from meshreg.datasets import collate
 from meshreg.netscripts import reloadmodel,get_dataset
-from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt
+from meshreg.models.utils import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt
 from torch.utils.data._utils.collate import default_collate
 
 from distutils.dir_util import copy_tree
@@ -511,7 +511,7 @@ def main(args=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     parser = ArgumentParser()
-    parser.add_argument("--max_epochs", type=int, default=2000)
+    parser.add_argument("--max_epochs", type=int, default=1000)
     #parser.add_argument("--data_device", type=str, default='cpu', choices=['cpu', 'cuda'])
     parser.add_argument("--debug", type=int, default=0, choices=[0, 1])
     parser.add_argument("--dummy_data", type=int, default=0, choices=[0, 1])
