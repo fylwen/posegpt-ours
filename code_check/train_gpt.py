@@ -36,7 +36,7 @@ from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 
 from meshreg.datasets import collate
 from meshreg.netscripts import reloadmodel,get_dataset
-from meshreg.models.utils import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs
+from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs
 from torch.utils.data._utils.collate import default_collate
 
 from distutils.dir_util import copy_tree
@@ -284,10 +284,10 @@ class GTrainer(Trainer):
                 #    self.best_val = val
 
 
-            if epoch % self.args.ckpt_freq == 0 and epoch > 1:
+            if epoch % self.args.ckpt_freq == 0 or epoch<=2:# and epoch > 1:
                 self.checkpoint(tag='ckpt_' + str(epoch), extra_dict={'best_val': self.best_val})
 
-            if epoch % self.args.restart_ckpt_freq == 0 and epoch > 1:
+            if epoch % self.args.restart_ckpt_freq == 0:# and epoch > 1:
                 self.checkpoint(tag='ckpt_restart', extra_dict={'best_val': self.best_val})
 
             self.current_epoch += 1
@@ -541,6 +541,8 @@ def main(args=None):
         vq_model.quantizer.load_state(bins)
         
     model = Model(**vars(args), vqvae=vq_model).to(device)
+
+    print(model)
 
     print("VQ model parameter count: ")
     print_parameters_count(model.vqvae, detailed=args.detailed_count, tag='VQ - ')

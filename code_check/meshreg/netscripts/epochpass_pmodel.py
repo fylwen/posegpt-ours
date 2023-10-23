@@ -293,13 +293,6 @@ def epoch_pass_eval(
         for pid in range(ntokens_pred):
             save_dict[f"pred{pid}_{eval_name}_local_epe_mean"]=eval_res["per_frame_epe_mean"][pid]
 
-
-    for pid in range(0,ntokens_pred):
-        print('pred #{:d} L/R {:.2f} {:.2f}'.format(pid, 100*save_dict[f"pred{pid}_left_joints3d_epe_mean"],100*save_dict[f"pred{pid}_right_joints3d_epe_mean"]),\
-                'Frame-RA L/R {:.2f} {:.2f}'.format(100*save_dict[f"pred{pid}_left_joints3d_local_epe_mean"],100*save_dict[f"pred{pid}_right_joints3d_local_epe_mean"]))
-    #print('pred ave. L/R {:.2f} {:.2f}'.format(100*save_dict["pred_left_joints3d_epe_mean"],100*save_dict["pred_right_joints3d_epe_mean"]),
-    #         'Frame-RA L/R {:.2f} {:.2f}'.format(100*save_dict["pred_left_joints3d_local_epe_mean"],100*save_dict["pred_right_joints3d_local_epe_mean"]))
-
     save_dict["ntokens_obsv"]=ntokens_obsv
     save_dict["ntokens_pred"]=ntokens_pred
 
