@@ -9,7 +9,7 @@ from einops import repeat
 from meshreg.models.transformer import Transformer_Encoder,Transformer_Decoder, PositionalEncoding
 
 from meshreg.models.utils import  loss_str2func,get_flatten_hand_feature, compose_Rt_a2b
-from meshreg.models.utils import from_comp_to_joints, load_mano_mean_pose
+from meshreg.models.utils import from_comp_to_joints, load_mano_mean_pose, compute_in_cam_goal2start
 from meshreg.models.mlp import MultiLayerPerceptron
 from meshreg.models.pmodel import MotionNet as MotionNet_
 
@@ -51,23 +51,26 @@ class MotionNet(MotionNet_):
 
         
         self.use_resnet_input=False
+        self.use_gt_hand_size=False
         self.gt_ite0=True and self.num_iterations>1
 
 
 
     def update_with_resnet_obsv(self,batch_flatten,verbose=False):   
         return_batch={}
-        for name in ["hand_size_left","hand_size_right"]:
-            return_batch[name]=batch_flatten[name+"_resnet"]
+        if not self.use_gt_hand_size:
+            for name in ["hand_size_left","hand_size_right"]:
+                return_batch[name]=batch_flatten[name+"_resnet"]
 
         batch_flatten_resnet={}
         for name in ['cam_joints3d_left','cam_joints3d_right','R_cam2local_left','t_cam2local_left','R_cam2local_right','t_cam2local_right',\
                     'hand_size_left','hand_size_right']:                
-            batch_seq_resnet_feature=batch_flatten[name+"_resnet"].view((-1,self.ntokens_op)+batch_flatten[name+"_resnet"].shape[1:])[:,:self.ntokens_obsv]
+            batch_seq_resnet_feature=batch_flatten[name+"_resnet"].cuda().view((-1,self.ntokens_op)+batch_flatten[name+"_resnet"].shape[1:])[:,:self.ntokens_obsv]
+            
             batch_flatten_resnet[name]=torch.flatten(batch_seq_resnet_feature,0,1)
             
         for name in ["valid_joints_left","valid_joints_right"]:
-            batch_flatten_resnet[name]=torch.flatten(batch_flatten[name].view((-1,self.ntokens_op)+batch_flatten[name].shape[1:])[:,:self.ntokens_obsv],0,1)
+            batch_flatten_resnet[name]=torch.flatten(batch_flatten[name].cuda().view((-1,self.ntokens_op)+batch_flatten[name].shape[1:])[:,:self.ntokens_obsv],0,1)
         
         flatten_comps, hand_gts = get_flatten_hand_feature(batch_flatten_resnet, 
                                         len_seq=self.ntokens_obsv, 
@@ -80,7 +83,22 @@ class MotionNet(MotionNet_):
                                         verbose=verbose)
         for k in ['flatten_firstclip_R_base2cam_left','flatten_firstclip_t_base2cam_left','flatten_firstclip_R_base2cam_right','flatten_firstclip_t_base2cam_right']:
             return_batch[k]=hand_gts[k]
-                 
+
+
+        batch_seq_valid_frame_obsv=batch_flatten["valid_frame"].cuda().view(-1,self.ntokens_op)[:,:self.ntokens_obsv]
+        batch_flatten_resnet["batch_seq_valid_frame"]=batch_seq_valid_frame_obsv
+        blend_info = compute_in_cam_goal2start(batch_flatten_resnet,factor_scaling=self.hand_scaling_factor,verbose=verbose)
+        return_batch.update(blend_info)
+
+        if verbose:
+            print("supposing all valid_frame, check goal2start is consistent with local2base in obsv")
+            print(torch.abs(hand_gts['flatten_R_local2base_left'][15::self.ntokens_obsv]-return_batch['flatten_incam_R_goal2start_left'][15::self.ntokens_obsv]).max())
+            print(torch.abs(hand_gts['flatten_t_local2base_left'][15::self.ntokens_obsv]-return_batch['flatten_incam_t_goal2start_left'][15::self.ntokens_obsv]).max())
+            print(torch.abs(hand_gts['flatten_R_local2base_right'][15::self.ntokens_obsv]-return_batch['flatten_incam_R_goal2start_right'][15::self.ntokens_obsv]).max())
+            print(torch.abs(hand_gts['flatten_t_local2base_right'][15::self.ntokens_obsv]-return_batch['flatten_incam_t_goal2start_right'][15::self.ntokens_obsv]).max())
+
+
+
         flatten_hand_comp=flatten_comps["gt"][:,:self.dim_hand_feature]
         batch_seq_hand_comp = flatten_hand_comp.view(-1,self.ntokens_obsv, self.dim_hand_feature)
 
@@ -102,9 +120,12 @@ class MotionNet(MotionNet_):
         #lets start
         batch_size=batch0["batch_seq_hand_comp_obsv"].shape[0]
         trans_info={}
-        for k in ['flatten_firstclip_R_base2cam_left','flatten_firstclip_t_base2cam_left','flatten_firstclip_R_base2cam_right','flatten_firstclip_t_base2cam_right']:
-            trans_info[k]=batch0[k]
-        
+        for k in ['flatten_firstclip_R_base2cam_left','flatten_firstclip_t_base2cam_left','flatten_firstclip_R_base2cam_right','flatten_firstclip_t_base2cam_right','batch_seq_lambda','batch_goal_idx',\
+                'flatten_incam_R_goal2start_left','flatten_incam_t_goal2start_left','flatten_incam_R_goal2start_right','flatten_incam_t_goal2start_right']:
+            if k in batch0:
+                trans_info[k]=batch0[k]
+
+
         batch_seq_valid_frame=batch0["valid_frame"].cuda().view(batch_size,self.ntokens_op)
         batch0["batch_seq_valid_features"]=torch.mul(batch0["batch_seq_valid_features"],torch.unsqueeze(batch_seq_valid_frame,-1))
         results["batch_seq_valid_frame_out"]=batch_seq_valid_frame
@@ -133,8 +154,9 @@ class MotionNet(MotionNet_):
             batch_seq_obsv_mask=torch.zeros_like(batch_seq_valid_frame.bool())[:,:self.ntokens_obsv]
             if verbose:
                 print(f"Ite #{ite_id}")
-                
+            
             batch_mid_mu_enc_out, batch_mid_logvar_enc_out,batch_seq_hand_feature_enc_out, batch_seq_hand_comp_enc_out = self.feed_encoder(batch_seq_hand_comp_obsv,batch_seq_obsv_mask, verbose=verbose)
+            
             
             noise_factor=1.
             if to_reparameterize:
@@ -159,7 +181,7 @@ class MotionNet(MotionNet_):
                 batch_seq_dec_mem_mask=torch.cat((batch_seq_dec_mem_mask,batch_seq_obsv_mask),dim=1)
             
             #print(batch_seq_dec_mem.shape)
-            batch_seq_hand_feature_dec_out, batch_seq_hand_comp_dec_out=self.feed_decoder(batch_seq_dec_mem,batch_seq_dec_mem_mask,verbose)
+            batch_seq_hand_feature_dec_out, batch_seq_hand_comp_dec_out=self.feed_decoder(batch_seq_dec_mem,batch_seq_dec_mem_mask,batch_seq_dec_query=None, batch_seq_dec_tgt_key_padding_mask=None,verbose=verbose)
             if verbose:
                 print('batch_seq_hand_feature_dec_out/batch_seq_hand_comp_dec_out',batch_seq_hand_feature_dec_out.shape,batch_seq_hand_comp_dec_out.shape)
                 #[bs,len_p,512][bs,len_p,144]
@@ -172,20 +194,36 @@ class MotionNet(MotionNet_):
                                                 batch_seq_valid_features=batch0["batch_seq_valid_features"][:,:self.ntokens_obsv],
                                                 batch_mean_hand_size=(batch_mean_hand_left_size,batch_mean_hand_right_size),
                                                 trans_info=trans_info, 
-                                                nbase_idx=self.ntokens_pred-1, verbose=verbose)#                
+                                                nbase_idx=self.ntokens_pred-1,
+                                                ensure_consistent_goal=False, verbose=verbose)#                
                 batch_seq_hand_comp_dec_out=results_hand0["batch_seq_comp_local_normalized"]
 
-                results_hand,trans_info=self.batch_seq_from_comp_to_joints(batch_seq_comp_out=batch0["batch_seq_hand_comp_gt"][:,ite_id*self.ntokens_pred+self.ntokens_obsv:(ite_id+1)*self.ntokens_pred+self.ntokens_obsv],
+                results_hand,trans_info=self.batch_seq_from_comp_to_joints(batch_seq_comp_out=batch0["batch_seq_hand_comp_gt"][:,self.ntokens_obsv:self.ntokens_pred+self.ntokens_obsv],
                                                 batch_seq_valid_features=batch0["batch_seq_valid_features"][:,:self.ntokens_obsv],
                                                 batch_mean_hand_size=(batch_mean_hand_left_size,batch_mean_hand_right_size),
                                                 trans_info=trans_info, 
-                                                nbase_idx=self.ntokens_pred-1, verbose=verbose)#
+                                                nbase_idx=self.ntokens_pred-1,
+                                                ensure_consistent_goal=False, verbose=verbose)#
             else:
-                results_hand,trans_info=self.batch_seq_from_comp_to_joints(batch_seq_comp_out=torch.cat((batch_seq_hand_comp_enc_out,batch_seq_hand_comp_dec_out),dim=1) if self.output_obsv else batch_seq_hand_comp_dec_out,
-                                                batch_seq_valid_features=batch0["batch_seq_valid_features"] if self.output_obsv else batch0["batch_seq_valid_features"][:,:self.ntokens_obsv],
+                if self.output_obsv:
+                    results_hand0,trans_info=self.batch_seq_from_comp_to_joints(batch_seq_hand_comp_enc_out,#batch0["batch_seq_hand_comp_obsv"],#
+                                                batch_seq_valid_features=batch0["batch_seq_valid_features"][:,:self.ntokens_obsv],
                                                 batch_mean_hand_size=(batch_mean_hand_left_size,batch_mean_hand_right_size),
                                                 trans_info=trans_info, 
-                                                nbase_idx=self.ntokens_pred-1, verbose=verbose)#                
+                                                nbase_idx=self.ntokens_obsv-1, 
+                                                ensure_consistent_goal="batch_seq_lambda" in trans_info, 
+                                                verbose=verbose)#   
+                                                
+                results_hand,trans_info=self.batch_seq_from_comp_to_joints(batch_seq_hand_comp_dec_out,
+                                                batch_seq_valid_features=batch0["batch_seq_valid_features"][:,:self.ntokens_obsv],
+                                                batch_mean_hand_size=(batch_mean_hand_left_size,batch_mean_hand_right_size),
+                                                trans_info=trans_info, 
+                                                nbase_idx=self.ntokens_pred-1, 
+                                                ensure_consistent_goal=False, verbose=verbose)#   
+                if self.output_obsv:
+                    for k in ['batch_seq_joints3d_in_base', 'batch_seq_joints3d_in_cam', 'batch_seq_joints3d_in_local', 'batch_seq_local2base']:
+                        results_hand[k]=torch.cat([results_hand0[k],results_hand[k]],dim=1)
+                
                 batch_seq_hand_comp_dec_out=results_hand["batch_seq_comp_local_normalized"]
                                                 
             for key in ["local","cam"]:
@@ -214,11 +252,12 @@ class MotionNet(MotionNet_):
                 print(k,v.shape) 
         return total_loss,results,losses
         
-    def batch_seq_from_comp_to_joints(self, batch_seq_comp_out, batch_mean_hand_size, batch_seq_valid_features, trans_info, nbase_idx, verbose=False):   
+    def batch_seq_from_comp_to_joints(self, batch_seq_comp_out, batch_mean_hand_size, batch_seq_valid_features, trans_info, nbase_idx, ensure_consistent_goal, verbose=False):   
         output_results=super().batch_seq_from_comp_to_joints(batch_seq_comp=batch_seq_comp_out,
                                                         batch_mean_hand_size=batch_mean_hand_size,
                                                         trans_info=trans_info,
                                                         normalize_size_from_comp=True,
+                                                        ensure_consistent_goal=ensure_consistent_goal,
                                                         batch_seq_valid_features=batch_seq_valid_features,
                                                         verbose=verbose,)
 

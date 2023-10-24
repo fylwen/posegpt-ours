@@ -151,8 +151,11 @@ class SeqSet(SeqSet_):
                 
         for key in self.grp_key[0]+self.grp_key[1]:
             if "clip_frame_"+key in batch_pred and key!="image":
-                batch_pred['clip_frame_'+key][:,:]=batch_obsv["clip_frame_"+key][-2:-1,-2:-1].copy()
-                    
+                if batch_obsv["clip_frame_"+key].shape[0]==1:
+                    batch_pred['clip_frame_'+key][:,:]=batch_obsv["clip_frame_"+key][0:1,-2:-1].copy()
+                else:
+                    batch_pred['clip_frame_'+key][:,:]=batch_obsv["clip_frame_"+key][-2:-1,-2:-1].copy()
+                
         return batch_pred
     
 
@@ -175,7 +178,7 @@ class SeqSet(SeqSet_):
             num_obsv_clips=random.randint(1, min(self.const_ntokens_obsv, num_action_clips))
             num_pred_clips=0 if num_action_clips-num_obsv_clips<1 else random.randint(1, min(self.const_ntokens_pred, num_action_clips-num_obsv_clips))
         elif self.const_ntokens_obsv<self.capacity_ntokens:            
-            num_obsv_clips=min(self.const_ntokens_obsv, num_action_clips-1)
+            num_obsv_clips=min(self.const_ntokens_obsv, num_action_clips-1)#The num_action_clips-1 may cause num_clips for obsv as 0.
             num_pred_clips=0 if num_action_clips-num_obsv_clips<1 else min(self.const_ntokens_pred+1, num_action_clips-num_obsv_clips)
         else:
             num_obsv_clips=min(self.const_ntokens_obsv,num_action_clips)

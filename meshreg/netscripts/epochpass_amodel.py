@@ -9,7 +9,7 @@ import torch.nn.functional as torch_f
 import numpy as np
 
 from libyana.evalutils.avgmeter import AverageMeters
-from meshreg.models.utils import torch2numpy
+from meshreg.models.utils import torch2numpy,compute_root_aligned_and_palmed_aligned
 from meshreg.netscripts import position_evaluator as evaluate
 from meshreg.netscripts.classification_evaluator import FrameClassificationEvaluator
 from meshreg.netscripts.position_evaluator import MyMEPE, feed_mymepe_evaluators_hands, MyVAE, feed_myvae_evaluator_hands
@@ -25,27 +25,17 @@ def epoch_pass(
     epoch,
     pose_dataset,
     split_tag,
-    ntokens_per_clip,
     lr_decay_gamma=0,
     tensorboard_writer=None,
 ):
     train= (split_tag=='train')
     
     action_obsv_evaluator = FrameClassificationEvaluator(model.action_name2idx)
-    try:
-        object_obsv_evaluator=FrameClassificationEvaluator(model.object_name2idx)
-    except:
-        object_obsv_evaluator=None
-    with_object_classification=False
-    with_obsv_pose_estimation=False
-
+    
     avg_meters = AverageMeters()
     evaluators_pred = {"left_joints3d":  MyMEPE(),"right_joints3d": MyMEPE()} 
     evaluators_pred_local={"left_joints3d":  MyMEPE(),"right_joints3d": MyMEPE()}
 
-    evaluators_obsv = {"left_joints3d":  MyMEPE(),"right_joints3d": MyMEPE()}
-    evaluators_obsv_local={"left_joints3d":  MyMEPE(),"right_joints3d": MyMEPE()}
-    evaluators_obsv_ra={"left_joints3d":  MyMEPE(),"right_joints3d": MyMEPE()}
 
     verbose=False
     # Loop over dataset
@@ -78,28 +68,6 @@ def epoch_pass(
             
             action_obsv_evaluator.feed(gt_labels=results["batch_action_idx_obsv_gt"],pred_labels=results["batch_action_idx_obsv_out"],weights=None)
 
-            if "obj_idx_gt" in results and object_obsv_evaluator is not None:
-                object_obsv_evaluator.feed(gt_labels=torch.flatten(results["obj_idx_gt"]),
-                                    pred_labels=torch.flatten(results["obj_idx_out"]),weights=None)
-                with_object_classification=True
-                
-            if "est_batch_seq_joints3d_in_cam_out_obsv" in results:
-                with_obsv_pose_estimation=True
-                batch_seq_weights=results["est_batch_seq_valid_frames_obsv"]
-                batch_seq_cam_joints3d_gt, batch_seq_cam_joints3d_out=results["est_batch_seq_joints3d_in_cam_gt_obsv"],results["est_batch_seq_joints3d_in_cam_out_obsv"]
-                feed_mymepe_evaluators_hands(evaluators_obsv, batch_seq_cam_joints3d_out, batch_seq_cam_joints3d_gt, batch_seq_weights, valid_joints=pose_dataset.valid_joints)
-                
-                batch_seq_ra_joints3d_gt=batch_seq_cam_joints3d_gt.clone()
-                batch_seq_ra_joints3d_gt[:,:,:21]-=batch_seq_cam_joints3d_gt[:,:,0:1]
-                batch_seq_ra_joints3d_gt[:,:,21:]-=batch_seq_cam_joints3d_gt[:,:,21:22]
-                batch_seq_ra_joints3d_out=batch_seq_cam_joints3d_out.clone()
-                batch_seq_ra_joints3d_out[:,:,:21]-=batch_seq_cam_joints3d_out[:,:,0:1]
-                batch_seq_ra_joints3d_out[:,:,21:]-=batch_seq_cam_joints3d_out[:,:,21:22]
-                feed_mymepe_evaluators_hands(evaluators_obsv_ra, batch_seq_ra_joints3d_out, batch_seq_ra_joints3d_gt, batch_seq_weights, valid_joints=pose_dataset.valid_joints[1:])
-
-                feed_mymepe_evaluators_hands(evaluators_obsv_local,results["est_batch_seq_joints3d_in_local_out_obsv"], 
-                                        results["est_batch_seq_joints3d_in_local_gt_obsv"],  batch_seq_weights, valid_joints=pose_dataset.valid_joints[1:])
-
     save_dict = {}
     if train and lr_decay_gamma and scheduler is not None:
         assert False
@@ -125,21 +93,6 @@ def epoch_pass(
         for eval_name, eval_res in evaluator_results.items():
             save_dict[f"pred_{eval_name}_local_epe_mean"]=eval_res["epe_mean"]
         
-        if with_object_classification:
-            object_result=object_obsv_evaluator.get_recall_rate()
-            for k,v in object_result.items():
-                save_dict['objlabel_'+k]=v
-
-        if with_obsv_pose_estimation:
-            evaluator_results = evaluate.parse_evaluators(evaluators_obsv)
-            for eval_name, eval_res in evaluator_results.items():
-                save_dict[f"obsv_{eval_name}_epe_mean"]=eval_res["epe_mean"]                
-            evaluator_results = evaluate.parse_evaluators(evaluators_obsv_local)
-            for eval_name, eval_res in evaluator_results.items():
-                save_dict[f"obsv_{eval_name}_local_epe_mean"]=eval_res["epe_mean"]
-            evaluator_results = evaluate.parse_evaluators(evaluators_obsv_ra)
-            for eval_name, eval_res in evaluator_results.items():
-                save_dict[f"obsv_{eval_name}_ra_epe_mean"]=eval_res["epe_mean"]
     
     print("Epoch",epoch)
     if not tensorboard_writer is None:
@@ -176,15 +129,19 @@ def epoch_pass_eval(
     
     save_dict_fid={"batch_action_name_obsv":[],"batch_enc_out_global_feature":[]}
 
+    if not model.gt_ite0:
+        ntokens_pred+=model.model_pblock.ntokens_pred
+
+
     verbose=False
     # Loop over dataset
     model.eval() 
-    vis_batch_idx=[26,41,89]#[9,17,12,54,57,24,49,48,0,1]
+    
     for batch_idx, batch in enumerate(tqdm(loader)):
         batch_rs_seq_in_cam_pred_out=[]
         batch_rs_seq_in_local_pred_out=[]
 
-        for rs_id in range(0,1):
+        for rs_id in range(0,21):
             with torch.no_grad():
                 loss, results, losses = model(batch, is_train=False, to_reparameterize=rs_id>0, gt_action_for_dec=gt_action_for_dec, verbose=verbose)
 
@@ -209,33 +166,47 @@ def epoch_pass_eval(
 
                 if "est_batch_seq_joints3d_in_cam_out_obsv" in results:
                     with_obsv_pose_estimation=True
-                    batch_seq_weights=results["est_batch_seq_valid_frames_obsv"]
-                    batch_seq_cam_joints3d_gt, batch_seq_cam_joints3d_out=results["est_batch_seq_joints3d_in_cam_gt_obsv"],results["est_batch_seq_joints3d_in_cam_out_obsv"]
-                    feed_mymepe_evaluators_hands(evaluators_obsv, batch_seq_cam_joints3d_out, batch_seq_cam_joints3d_gt, batch_seq_weights, valid_joints=pose_dataset.valid_joints)
+                    batch_seq_weights_obsv=results["est_batch_seq_valid_frames_obsv"].view(-1,1)
+                    batch_seq_cam_joints3d_obsv_gt=torch.unsqueeze(torch.flatten(results["est_batch_seq_joints3d_in_cam_gt_obsv"],0,1),1)
+                    batch_seq_cam_joints3d_obsv_out=torch.unsqueeze(torch.flatten(results["est_batch_seq_joints3d_in_cam_out_obsv"],0,1),1)
                     
-                    batch_seq_ra_joints3d_gt=batch_seq_cam_joints3d_gt.clone()
-                    batch_seq_ra_joints3d_gt[:,:,:21]-=batch_seq_cam_joints3d_gt[:,:,0:1]
-                    batch_seq_ra_joints3d_gt[:,:,21:]-=batch_seq_cam_joints3d_gt[:,:,21:22]
-
-                    batch_seq_ra_joints3d_out=batch_seq_cam_joints3d_out.clone()
-                    batch_seq_ra_joints3d_out[:,:,:21]-=batch_seq_cam_joints3d_out[:,:,0:1]
-                    batch_seq_ra_joints3d_out[:,:,21:]-=batch_seq_cam_joints3d_out[:,:,21:22]
-                    feed_mymepe_evaluators_hands(evaluators_obsv_ra, batch_seq_ra_joints3d_out, batch_seq_ra_joints3d_gt, batch_seq_weights, valid_joints=pose_dataset.valid_joints[1:])
-
-                    feed_mymepe_evaluators_hands(evaluators_obsv_local,results["est_batch_seq_joints3d_in_local_out_obsv"], 
-                                            results["est_batch_seq_joints3d_in_local_gt_obsv"],  batch_seq_weights, valid_joints=pose_dataset.valid_joints[1:])
+                    feed_mymepe_evaluators_hands(evaluators_obsv, batch_seq_cam_joints3d_obsv_out,batch_seq_cam_joints3d_obsv_gt,
+                                            batch_seq_weights_obsv, valid_joints=pose_dataset.valid_joints)
                                             
-            if model_fid is not None:
+                    
+                    batch_seq_ra_joints3d_obsv_gt=batch_seq_cam_joints3d_obsv_gt.clone()
+                    batch_seq_ra_joints3d_obsv_gt[:,:,:21]-=batch_seq_cam_joints3d_obsv_gt[:,:,0:1]
+                    batch_seq_ra_joints3d_obsv_gt[:,:,21:]-=batch_seq_cam_joints3d_obsv_gt[:,:,21:22]
+
+                    batch_seq_ra_joints3d_obsv_out=batch_seq_cam_joints3d_obsv_out.clone()
+                    batch_seq_ra_joints3d_obsv_out[:,:,:21]-=batch_seq_cam_joints3d_obsv_out[:,:,0:1]
+                    batch_seq_ra_joints3d_obsv_out[:,:,21:]-=batch_seq_cam_joints3d_obsv_out[:,:,21:22]
+                    
+
+                    res_flatten=compute_root_aligned_and_palmed_aligned(batch_seq_ra_joints3d_obsv_out.view(-1,42,3), 
+                                                                    batch_seq_ra_joints3d_obsv_gt.view(-1,42,3), 
+                                                                    align_to_gt_size=True,
+                                                                    valid_joints=pose_dataset.valid_joints,)
+                    
+                    
+                    batch_seq_ra_joints3d_obsv_out=torch.cat([res_flatten["flatten_left_ra_out"],res_flatten["flatten_right_ra_out"]],dim=1).view(batch_seq_ra_joints3d_obsv_out.shape)
+                    feed_mymepe_evaluators_hands(evaluators_obsv_ra, batch_seq_ra_joints3d_obsv_out, batch_seq_ra_joints3d_obsv_gt, batch_seq_weights_obsv, valid_joints=pose_dataset.valid_joints[1:])
+                    
+                    batch_seq_pa_joints3d_obsv_out=torch.cat([res_flatten["flatten_left_pa_out"],res_flatten["flatten_right_pa_out"]],dim=1).view(batch_seq_ra_joints3d_obsv_out.shape)     
+                    feed_mymepe_evaluators_hands(evaluators_obsv_local, batch_seq_pa_joints3d_obsv_out, batch_seq_ra_joints3d_obsv_gt, batch_seq_weights_obsv, valid_joints=pose_dataset.valid_joints)#[1:])
+
+            if model_fid is not None and rs_id>0:
                 num_obsv_frames=torch.sum(results["batch_seq_valid_frames_obsv"][0])
-                num_frames_to_pad=num_obsv_frames+model.model_pblock.ntokens_pred
-                batch_seq_valid_frame=torch.cat([results["batch_seq_valid_frames_obsv"][:,:num_obsv_frames],
-                                                results["batch_seq_valid_frames_cdpred"][:,:model.model_pblock.ntokens_pred+ntokens_pred]],dim=1)
+                num_frames_to_pad=num_obsv_frames+(0 if not model.gt_ite0 else model.model_pblock.ntokens_pred)
+                num_pred_frames=ntokens_pred+(0 if not model.gt_ite0 else model.model_pblock.ntokens_pred)
+
+
+                batch_seq_valid_frame=torch.cat([results["batch_seq_valid_frames_obsv"][:,:num_obsv_frames],results["batch_seq_valid_frames_cdpred"][:,:num_pred_frames]],dim=1)
                 if verbose:
-                    print("num_obsv_frames",num_obsv_frames,"num_frames_to_pad",num_frames_to_pad)
+                    print("num_obsv_frames",num_obsv_frames,"num_pred_frames",num_pred_frames,"num_frames_to_pad",num_frames_to_pad)
                     print("batch_seq_valid_frame",batch_seq_valid_frame.shape)
                     print(results["batch_seq_valid_frames_obsv"].shape,torch.sum(results["batch_seq_valid_frames_obsv"],dim=1))
-                    print(results["batch_seq_valid_frames_cdpred"].shape,torch.sum(results["batch_seq_valid_frames_cdpred"],dim=1))                
-                    
+                    print(results["batch_seq_valid_frames_cdpred"].shape,torch.sum(results["batch_seq_valid_frames_cdpred"],dim=1))
                     assert (torch.sum(results["batch_seq_valid_frames_obsv"],dim=1)==num_obsv_frames).all()
                     for i in range(batch_seq_valid_frame.shape[0]):
                         cnum_valid=torch.sum(batch_seq_valid_frame[i])
@@ -244,36 +215,39 @@ def epoch_pass_eval(
 
                 #use valid obsv only
                 batch_seq_joints3d_in_cam_gt=torch.cat([results["batch_seq_joints3d_in_cam_obsv_gt"][:,:num_obsv_frames],results["batch_seq_joints3d_in_cam_cdpred_gt"]],dim=1)
-                batch_seq_joints3d_in_cam_out=results["batch_seq_joints3d_in_cam_pred_out"][:,:ntokens_pred]
+                batch_seq_joints3d_in_cam_out=results["batch_seq_joints3d_in_cam_pred_out"][:,:ntokens_pred]###################
 
                 batch_seq_joints3d_in_local_gt=torch.cat([results["batch_seq_joints3d_in_local_obsv_gt"][:,:num_obsv_frames],results["batch_seq_joints3d_in_local_cdpred_gt"]],dim=1)
-                batch_seq_joints3d_in_local_out=results["batch_seq_joints3d_in_local_pred_out"][:,:ntokens_pred]
+                batch_seq_joints3d_in_local_out=results["batch_seq_joints3d_in_local_pred_out"][:,:ntokens_pred]########################
 
-                batch_seq_joints3d_in_cam_for_fid=torch.cat([batch_seq_joints3d_in_cam_gt[:,:num_frames_to_pad],batch_seq_joints3d_in_cam_out],dim=1)
-                batch_seq_joints3d_in_local_for_fid=torch.cat([batch_seq_joints3d_in_local_gt[:,:num_frames_to_pad],batch_seq_joints3d_in_local_out],dim=1)
-                
+                batch_seq_joints3d_in_cam_for_fid=torch.cat([batch_seq_joints3d_in_cam_gt[:,:num_frames_to_pad],
+                                                    batch_seq_joints3d_in_cam_out.double()],dim=1)
+                batch_seq_joints3d_in_local_for_fid=torch.cat([batch_seq_joints3d_in_local_gt[:,:num_frames_to_pad],
+                                                    batch_seq_joints3d_in_local_out.double()],dim=1)
+
                 if verbose:
                     print(results["batch_seq_joints3d_in_cam_obsv_gt"].shape,results["batch_seq_joints3d_in_cam_cdpred_gt"].shape)
                     print(results["batch_seq_joints3d_in_local_obsv_gt"].shape,results["batch_seq_joints3d_in_local_cdpred_gt"].shape)
                     print("cam",batch_seq_joints3d_in_cam_gt.shape,batch_seq_joints3d_in_cam_out.shape)
                     print("local",batch_seq_joints3d_in_local_gt.shape,batch_seq_joints3d_in_local_out.shape)
-
                     print("for fid",batch_seq_joints3d_in_cam_for_fid.shape,batch_seq_joints3d_in_local_for_fid.shape)
-                
+
+
                 batch_to_fid={"batch_seq_cam_joints3d_left":batch_seq_joints3d_in_cam_for_fid[:,:,:21],
                             "batch_seq_cam_joints3d_right":batch_seq_joints3d_in_cam_for_fid[:,:,21:],
                             "batch_seq_local_joints3d_left":batch_seq_joints3d_in_local_for_fid[:,:,:21],
                             "batch_seq_local_joints3d_right":batch_seq_joints3d_in_local_for_fid[:,:,21:],
                             "batch_seq_valid_frame":batch_seq_valid_frame,
                             "batch_action_name_obsv":results["batch_action_name_obsv"]}
-                #batch_to_fid.update(batch)
-                
+
+
                 with torch.no_grad():
-                    _, results_fid, _ =model_fid(batch_to_fid, num_prefix_frames_to_remove=0,batch_is_gt=False,compute_loss=False,verbose=verbose)
+                    _, results_fid, _ =model_fid(batch_to_fid, num_prefix_frames_to_remove=0,batch_is_gt=False,compute_loss=False,verbose=False)
                 for k in ["batch_action_name_obsv"]:
                     save_dict_fid[k]+=results_fid[k]
                 for k in ["batch_enc_out_global_feature"]:
                     save_dict_fid[k].append(results_fid[k])
+
 
             is_vis=True and "batch_seq_image_vis_cdpred" in results
             if is_vis:                
@@ -316,7 +290,7 @@ def epoch_pass_eval(
                                 batch_seq_valid_frames_pred=results["batch_seq_valid_frames_cdpred"],
                                 prefix_cache_img=f"./{tag_out}/imgs/", path_video=f"./{tag_out}/"+'{:04d}_{:02d}_{:02d}.avi'.format(batch_idx,sample_id, rs_id))
         
-        if torch.mean(batch_seq_weights.float())>1.0-1e-5 and len(batch_rs_seq_in_cam_pred_out)>0:
+        if len(batch_rs_seq_in_cam_pred_out)>0:#torch.mean(batch_seq_weights.float())>1.0-1e-5 and 
             batch_rs_seq_in_cam_pred_out=torch.cat(batch_rs_seq_in_cam_pred_out,dim=1)
             batch_rs_seq_in_local_pred_out=torch.cat(batch_rs_seq_in_local_pred_out,dim=1)
             feed_myvae_evaluator_hands(evaluator=evaluators_vae,batch_rs_seq_joints3d_out=batch_rs_seq_in_cam_pred_out, 
@@ -358,10 +332,6 @@ def epoch_pass_eval(
         for pid in range(ntokens_pred):
             save_dict[f"pred{pid}_{eval_name}_local_epe_mean"]=eval_res["per_frame_epe_mean"][pid]
             
-    #for pid in range(0,ntokens_pred):
-    #    print('pred #{:d} L/R {:.2f} {:.2f}'.format(pid, 100*save_dict[f"pred{pid}_left_joints3d_epe_mean"],100*save_dict[f"pred{pid}_right_joints3d_epe_mean"]),\
-    #            'Frame-RA L/R {:.2f} {:.2f}'.format(100*save_dict[f"pred{pid}_left_joints3d_local_epe_mean"],100*save_dict[f"pred{pid}_right_joints3d_local_epe_mean"]))
-
     save_dict["ntokens_pred"]=ntokens_pred
     evaluate.aggregate_and_save(f"./{tag_out}.npz",save_dict)
     
@@ -477,7 +447,7 @@ def epoch_pass_fid_eval_for_gt(
     
     verbose=False
     model.eval() 
-    dict_to_save={"batch_action_name_obsv":[],"batch_enc_out_global_feature":[]}#"imgpath_start_frame":[], "imgpath_end_frame":[],
+    dict_to_save={"batch_action_name_obsv":[],"batch_enc_out_global_feature":[]}
     
     for batch_idx, batch in enumerate(tqdm(loader)):        
         with torch.no_grad():
@@ -486,8 +456,6 @@ def epoch_pass_fid_eval_for_gt(
                 dict_to_save[k].append(results[k])
             assert not "NIL" in results["batch_action_name_obsv"]
 
-    #for k in ["imgpath_start_frame", "imgpath_end_frame","batch_action_name_obsv"]:
-    #    print(k,len(dict_to_save[k]))
     for k in ["batch_enc_out_global_feature"]:
         dict_to_save[k]=torch.cat(dict_to_save[k],dim=0).detach().cpu().numpy()
         print(k,dict_to_save[k].shape)

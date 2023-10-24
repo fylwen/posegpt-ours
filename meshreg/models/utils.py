@@ -6,7 +6,7 @@ import torch.nn as nn
 torch.set_printoptions(precision=4,sci_mode=False)
 
 from pytorch3d.ops import corresponding_points_alignment
-from pytorch3d.transforms import rotation_6d_to_matrix,matrix_to_rotation_6d,axis_angle_to_matrix
+from pytorch3d.transforms import rotation_6d_to_matrix,matrix_to_rotation_6d,axis_angle_to_matrix,matrix_to_axis_angle
 
 import matplotlib.pyplot as plt
 from einops import repeat
@@ -193,6 +193,56 @@ def align_torch_batch_for_cam2local(flatten_cam_joints, flatten_mano_palm_joints
         return_results[f"R_cam2local_{tag}"],return_results[f"t_cam2local_{tag}"]=align_a2b(flatten_cam_palm.double(),flatten_mano_palm,root_idx=0)
     return return_results
     
+def compute_in_cam_goal2start(batch_flatten,factor_scaling, verbose):
+    results={}
+    batch_size, len_seq=batch_flatten["batch_seq_valid_frame"].shape
+    batch_idxs=torch.arange(batch_size,dtype=batch_flatten["batch_seq_valid_frame"].dtype,device=batch_flatten["batch_seq_valid_frame"].device)
+
+    batch_goal_idx=torch.sum(batch_flatten["batch_seq_valid_frame"],dim=1,keepdim=False)-1
+    batch_goal_idx2=batch_goal_idx+batch_idxs*len_seq
+
+    if verbose:
+        print("batch_goal_idx/batch_goal_idx2",batch_goal_idx,batch_goal_idx2)
+        assert batch_size*len_seq==batch_flatten["R_cam2local_left"].shape[0]
+        assert batch_size*len_seq==batch_flatten["t_cam2local_left"].shape[0]
+        assert batch_size*len_seq==batch_flatten["R_cam2local_right"].shape[0]
+        assert batch_size*len_seq==batch_flatten["t_cam2local_right"].shape[0]
+
+    
+    batch_R_cam2goal_left=batch_flatten["R_cam2local_left"][batch_goal_idx2].clone().contiguous()
+    batch_t_cam2goal_left=factor_scaling*batch_flatten["t_cam2local_left"][batch_goal_idx2].clone().contiguous()
+    batch_R_cam2goal_right=batch_flatten["R_cam2local_right"][batch_goal_idx2].clone().contiguous()
+    batch_t_cam2goal_right=factor_scaling*batch_flatten["t_cam2local_right"][batch_goal_idx2].clone().contiguous()
+
+    batch_R_cam2start_left=batch_flatten["R_cam2local_left"][0::len_seq].clone().contiguous()
+    batch_t_cam2start_left=factor_scaling*batch_flatten["t_cam2local_left"][0::len_seq].clone().contiguous()
+    batch_R_cam2start_right=batch_flatten["R_cam2local_right"][0::len_seq].clone().contiguous()
+    batch_t_cam2start_right=factor_scaling*batch_flatten["t_cam2local_right"][0::len_seq].clone().contiguous()
+
+    batch_R_goal2start_left,batch_t_goal2start_left=compose_Rt_a2b(batch_R_c2a=batch_R_cam2goal_left,batch_t_c2a=batch_t_cam2goal_left,batch_R_c2b=batch_R_cam2start_left,batch_t_c2b=batch_t_cam2start_left,is_c2a=True)
+    batch_R_goal2start_right,batch_t_goal2start_right=compose_Rt_a2b(batch_R_c2a=batch_R_cam2goal_right,batch_t_c2a=batch_t_cam2goal_right,batch_R_c2b=batch_R_cam2start_right,batch_t_c2b=batch_t_cam2start_right,is_c2a=True)
+
+    if verbose:
+        print("batch_R/t_goal2start_left/right",batch_R_goal2start_left.shape,batch_t_goal2start_left.shape,batch_R_goal2start_right.shape,batch_t_goal2start_right.shape)
+        print("batch_R/t_cam2goal_left/right",batch_R_cam2goal_left.shape,batch_t_cam2goal_left.shape,batch_R_cam2goal_right.shape,batch_t_cam2goal_right.shape)
+        print("batch_R/t_cam2start_left/right",batch_R_cam2start_left.shape,batch_t_cam2start_left.shape,batch_R_cam2start_right.shape,batch_t_cam2start_right.shape)
+
+
+    frame_idxs=torch.arange(len_seq,dtype=batch_flatten["batch_seq_valid_frame"].dtype,device=batch_flatten["batch_seq_valid_frame"].device)
+    batch_seq_lambda=torch.mul(torch.unsqueeze(frame_idxs.float(),0),1./torch.unsqueeze(torch.where(batch_goal_idx<1,1,batch_goal_idx).float(),1))
+    if verbose:
+        print("batch_seq_lambda",batch_seq_lambda.shape,batch_seq_lambda[:10],batch_seq_lambda[-5:])#[bs,len_seq]
+
+    results["batch_seq_lambda"]=batch_seq_lambda
+    results["batch_goal_idx"]=batch_goal_idx
+    results["flatten_incam_R_goal2start_left"]=batch_R_goal2start_left.view(-1,1,3,3).repeat(1,len_seq,1,1).view(-1,3,3)
+    results["flatten_incam_t_goal2start_left"]=batch_t_goal2start_left.view(-1,1,1,3).repeat(1,len_seq,1,1).view(-1,1,3)
+    results["flatten_incam_R_goal2start_right"]=batch_R_goal2start_right.view(-1,1,3,3).repeat(1,len_seq,1,1).view(-1,3,3)
+    results["flatten_incam_t_goal2start_right"]=batch_t_goal2start_right.view(-1,1,1,3).repeat(1,len_seq,1,1).view(-1,1,3)
+
+    return results
+
+
 
 def compute_flatten_local2base_info(R_cam2local,t_cam2local,base_frame_id,len_seq,j3d_cam,verbose):
     results={}
@@ -233,6 +283,86 @@ def accumulate_flatten_local2base(flatten_Rt_vel,len_out,bs=-1,dim_rot=6):
             "flatten_R_local2base":flatten_R_local2base,
             "flatten_t_local2base":torch.flatten(trj_t_local2base,start_dim=0,end_dim=1),
             "flatten_R_local2base_6d":matrix_to_rotation_6d(flatten_R_local2base).view(-1,6)} 
+
+
+def blend_for_consistent_goal(results_local2base, trans_info, hand_tag, verbose):
+    batch_size,len_seq=trans_info["batch_seq_lambda"].shape
+    #check and makesure base frame is start frame
+    flatten_R_local2start=results_local2base["flatten_R_local2base"]
+    flatten_t_local2start=results_local2base["flatten_t_local2base"]
+
+    if verbose:
+        assert batch_size*len_seq==flatten_R_local2start.shape[0]
+        assert batch_size*len_seq==flatten_t_local2start.shape[0]
+
+    #set the first frame to have identity rotation and zero translation
+    flatten_R_local2start[0::len_seq]=torch.eye(3)
+    flatten_t_local2start[0::len_seq]=0.
+
+
+    batch_goal_idx=trans_info["batch_goal_idx"]
+    batch_idx = torch.arange(batch_size,dtype=batch_goal_idx.dtype,device=batch_goal_idx.device)
+    batch_goal_idx2=batch_idx*len_seq+batch_goal_idx
+    if verbose:
+        print("batch_goal_idx2,batch_goal_idx",batch_goal_idx2,batch_goal_idx)
+
+    batch_R_goal2start=flatten_R_local2start[batch_goal_idx2].contiguous()
+    batch_t_goal2start=flatten_t_local2start[batch_goal_idx2].contiguous()
+
+    flatten_R_goal2start=batch_R_goal2start.view(-1,1,3,3).repeat(1,len_seq,1,1).view(-1,3,3)
+    flatten_t_goal2start=batch_t_goal2start.view(-1,1,1,3).repeat(1,len_seq,1,1).view(-1,1,3)
+
+    flatten_incam_R_goal2start=trans_info[f"flatten_incam_R_goal2start_{hand_tag}"]
+    flatten_incam_t_goal2start=trans_info[f"flatten_incam_t_goal2start_{hand_tag}"]
+
+    if verbose:
+        print("batch_R_goal2start/batch_t_goal2start",batch_R_goal2start.shape,batch_t_goal2start.shape)#[bs,3,3],[bs,1,3]
+        print("flatten_incam_R_goal2start/flatten_incam_t_goal2start",flatten_incam_R_goal2start.shape,flatten_incam_t_goal2start.shape)#[bs*len_seq,3,3],[bs*len_seq,3,3]
+        print("flatten_R_local2start/flatten_t_local2start",flatten_R_local2start.shape,flatten_t_local2start.shape)#[bs*len_seq,3,3],[bs*len_seq,3,3]
+
+    flatten_R_start2goal,flatten_t_start2goal=get_inverse_Rt(flatten_R_goal2start,flatten_t_goal2start)
+    flatten_R_rectify, flatten_t_rectify=compose_Rt_a2b(batch_R_c2a=flatten_R_start2goal,batch_t_c2a=flatten_t_start2goal,
+                                                                batch_R_c2b=flatten_incam_R_goal2start,batch_t_c2b=flatten_incam_t_goal2start,is_c2a=False)
+    if verbose:
+        print("flatten_R_rectify/flatten_t_rectify",flatten_R_rectify.shape,flatten_t_rectify.shape)#[bs*len_seq,3,3],[bs*len_seq,1,3]
+
+    #A_(fs)2s[1-\lambda I + \lambda <A_(ts)2s^{-1} A_{t2s}>]
+    flatten_lambda=torch.flatten(trans_info["batch_seq_lambda"])
+    flatten_t_rectify=torch.mul(flatten_lambda.view(-1,1,1),flatten_t_rectify)
+    
+    flatten_R_axis_angle_rectify=matrix_to_axis_angle(flatten_R_rectify)
+    if verbose:
+        print("flatten_R_axis_angle_rectify",flatten_R_axis_angle_rectify.shape)#[bs*len_seq,3]
+    
+    flatten_R_axis_angle_rectify=torch.mul(flatten_lambda.view(-1,1),flatten_R_axis_angle_rectify)
+    flatten_R_rectify=axis_angle_to_matrix(flatten_R_axis_angle_rectify)
+    if verbose:
+        print("flatten_R_rectify",flatten_R_rectify.shape)#[bs*len_seq,3,3]
+    
+
+    flatten_R_local2start2,flatten_t_local2start2=compose_Rt_a2b(batch_R_c2a=flatten_R_local2start,batch_t_c2a=flatten_t_local2start,
+                                                                batch_R_c2b=flatten_R_rectify,batch_t_c2b=flatten_t_rectify,is_c2a=False)
+
+    if verbose:
+        print("check the goal frame consistency")
+        print(torch.abs(flatten_R_local2start2[batch_goal_idx2]-flatten_incam_R_goal2start[batch_goal_idx2]).max())
+        print(torch.abs(flatten_t_local2start2[batch_goal_idx2]-flatten_incam_t_goal2start[batch_goal_idx2]).max())
+        print(torch.abs(flatten_R_local2start2[0::len_seq]-flatten_R_local2start[0::len_seq]).max())
+        print(torch.abs(flatten_t_local2start2[0::len_seq]-flatten_t_local2start[0::len_seq]).max())
+
+
+    
+    return {"batch_seq_R_local2base":flatten_R_local2start2.view(batch_size,len_seq,3,3),
+            "batch_seq_t_local2base":flatten_t_local2start2.view(batch_size,len_seq,1,3),
+            "flatten_R_local2base":flatten_R_local2start2,
+            "flatten_t_local2base":flatten_t_local2start2,
+            "flatten_R_local2base_6d":matrix_to_rotation_6d(flatten_R_local2start2).view(-1,6)} 
+
+
+
+
+
+
   
 
 def augment_rotation_translation(R,t,noise_factor_angle,noise_factor_trans,verbose=False):
@@ -440,7 +570,7 @@ def get_flatten_hand_feature(batch_flatten, len_seq,spacing, base_frame_id,  fac
 
 
 
-def from_comp_to_joints(batch_seq_comp,flatten_hand_size, factor_scaling, trans_info=None, num_hands=2,num_joints=21,dim_joint=3,dim_rot=6,dim_tra=3,verbose=False):
+def from_comp_to_joints(batch_seq_comp,flatten_hand_size, factor_scaling, trans_info=None, num_hands=2,num_joints=21,dim_joint=3,dim_rot=6,dim_tra=3, ensure_consistent_goal=False, verbose=False):
     batch_seq_comp=batch_seq_comp.double()
     
     bs,len_out=batch_seq_comp.shape[0],batch_seq_comp.shape[1]
@@ -460,7 +590,9 @@ def from_comp_to_joints(batch_seq_comp,flatten_hand_size, factor_scaling, trans_
         #with velocity, recover global trajectory in base-frame space
         flatten_Rt_vel=batch_seq_comp[:,:,dev+hid*(dim_rot+dim_tra):dev+(hid+1)*(dim_rot+dim_tra)].reshape(bs*len_out,dim_rot+dim_tra)
         results_local2base=accumulate_flatten_local2base(flatten_Rt_vel=flatten_Rt_vel,len_out=len_out,bs=bs,dim_rot=dim_rot)
-        
+        if ensure_consistent_goal:
+            results_local2base=blend_for_consistent_goal(results_local2base,trans_info,hand_tag,verbose=verbose)
+
         for ttag in ["R","t"]:
             ttag2=f"batch_seq_{ttag}_local2base"
             to_return_trans_info[f"{ttag2}_{hand_tag}"]=results_local2base[ttag2]                
@@ -786,30 +918,103 @@ def embedding_lookup(query, embedding, verbose=False):
 
 
 
+def batch_compute_similarity_transform_torch(S1, S2, valid_joints, verbose=False):
+    '''
+    Computes a similarity transform (sR, t) that takes
+    a set of 3D points S1 (3 x N) closest to a set of 3D points S2,
+    where R is an 3x3 rotation matrix, t 3x1 translation, s scale.
+    i.e. solves the orthogonal Procrutes problem.
+    '''
+    S1=S1.float()
+    S2=S2.float()
 
-def compute_root_aligned_and_palmed_aligned(flatten_cent_joints_out, flatten_cent_joints_gt,align_to_gt_size, palm_joints=[0,5,9,13,17],verbose=False):
+    S1_ori=S1.clone()
+    #0. remove thumb root
+    S1=S1[:,valid_joints].contiguous()
+    S2=S2[:,valid_joints].contiguous()
+
+    transposed = False
+    if S1.shape[0] != 3 and S1.shape[0] != 2:
+        S1 = S1.permute(0,2,1)
+        S2 = S2.permute(0,2,1)
+        S1_ori=S1_ori.permute(0,2,1)
+        transposed = True
+    assert(S2.shape[1] == S1.shape[1])
+
+    # 1. Remove mean.
+    mu1 = S1.mean(axis=-1, keepdims=True)
+    mu2 = S2.mean(axis=-1, keepdims=True)
+
+    X1 = S1 - mu1
+    X2 = S2 - mu2
+
+    # 2. Compute variance of X1 used for scale.
+    var1 = torch.sum(X1**2, dim=1).sum(dim=1)
+
+    # 3. The outer product of X1 and X2.
+    K = X1.bmm(X2.permute(0,2,1))
+
+    if verbose:
+        print("S1,S2",S1.shape,S2.shape)#[bs,3,20]x2
+        print("mu1,mu2",mu1.shape,mu2.shape)#[bs,3,1]x2
+        print("var1",var1.shape,torch.sum(X1**2, dim=1).shape)#[bs],[bs,20]
+        print("K",K.shape)#[bs,3,3]
+
+    # 4. Solution that Maximizes trace(R'K) is R=U*V', where U, V are
+    # singular vectors of K.
+    U, s, V = torch.svd(K)
+
+    # Construct Z that fixes the orientation of R to get det(R)=1.
+    Z = torch.eye(U.shape[1], device=S1.device).unsqueeze(0)
+    Z = Z.repeat(U.shape[0],1,1)
+    Z[:,-1, -1] *= torch.sign(torch.det(U.bmm(V.permute(0,2,1))))
+
+    # Construct R.
+    R = V.bmm(Z.bmm(U.permute(0,2,1)))
+
+    # 5. Recover scale.
+    scale = torch.cat([torch.trace(x).unsqueeze(0) for x in R.bmm(K)]) / var1
+
+    # 6. Recover translation.
+    t = mu2 - (scale.unsqueeze(-1).unsqueeze(-1) * (R.bmm(mu1)))
+
+    # 7. Error:
+    S1_hat = scale.unsqueeze(-1).unsqueeze(-1) * R.bmm(S1_ori) + t
+
+    if transposed:
+        S1_hat = S1_hat.permute(0,2,1)
+    
+    if verbose:
+        print("R",R.shape)#[bs,3,3]
+        print("scale",scale.shape)#[bs]
+        print("t",t.shape)#[bs,3,1]
+        print("S1_hat",S1_hat.shape)#[bs,21,3]
+    return S1_hat
+
+
+def compute_root_aligned_and_palmed_aligned(flatten_ra_joints_out, flatten_ra_joints_gt,align_to_gt_size, valid_joints, palm_joints=[0,5,9,13,17],verbose=False):
     root_idx=palm_joints[0]
     return_results={}
     for tag in ["left","right"]:
-        flatten_cent_chand_out=(flatten_cent_joints_out[:,:21] if tag=="left" else flatten_cent_joints_out[:,21:]).clone().contiguous()
-        flatten_cent_chand_gt=(flatten_cent_joints_gt[:,:21] if tag=="left" else flatten_cent_joints_gt[:,21:]).clone().contiguous()
+        flatten_ra_chand_out=(flatten_ra_joints_out[:,:21] if tag=="left" else flatten_ra_joints_out[:,21:]).clone().contiguous()
+        flatten_ra_chand_gt=(flatten_ra_joints_gt[:,:21] if tag=="left" else flatten_ra_joints_gt[:,21:]).clone().contiguous()
 
         if align_to_gt_size:
-            palm_size_out=torch.mean(torch.norm(flatten_cent_chand_out[:,palm_joints[1:]]-flatten_cent_chand_out[:,root_idx:root_idx+1],p=2,dim=-1),dim=1).view(-1,1,1)
-            palm_size_gt=torch.mean(torch.norm(flatten_cent_chand_gt[:,palm_joints[1:]]-flatten_cent_chand_gt[:,root_idx:root_idx+1],p=2,dim=-1),dim=1).view(-1,1,1)#
+            palm_size_out=torch.mean(torch.norm(flatten_ra_chand_out[:,palm_joints[1:]]-flatten_ra_chand_out[:,root_idx:root_idx+1],p=2,dim=-1),dim=1).view(-1,1,1)
+            palm_size_gt=torch.mean(torch.norm(flatten_ra_chand_gt[:,palm_joints[1:]]-flatten_ra_chand_gt[:,root_idx:root_idx+1],p=2,dim=-1),dim=1).view(-1,1,1)#
             
             if verbose:
-                print("flatten_cent_chand_out/gt",flatten_cent_chand_out.shape,flatten_cent_chand_gt.shape)#[bs,21,3]
+                print("flatten_ra_chand_out/gt",flatten_ra_chand_out.shape,flatten_ra_chand_gt.shape)#[bs,21,3]
                 print("palm_size",palm_size_out.shape,palm_size_gt.shape)#[bs,1,1]
-                print("computation",(flatten_cent_chand_out[:,palm_joints[1:]]-flatten_cent_chand_out[:,root_idx:root_idx+1]).shape)
-                print((flatten_cent_chand_gt[:,palm_joints[1:]]-flatten_cent_chand_gt[:,root_idx:root_idx+1]).shape)#[bs,4,3]
-                print(torch.norm(flatten_cent_chand_out[:,palm_joints[1:]]-flatten_cent_chand_out[:,root_idx:root_idx+1],p=2,dim=-1).shape)
-                print(torch.norm(flatten_cent_chand_gt[:,palm_joints[1:]]-flatten_cent_chand_gt[:,root_idx:root_idx+1],p=2,dim=-1).shape)#[bs,4]
+                print("computation",(flatten_ra_chand_out[:,palm_joints[1:]]-flatten_ra_chand_out[:,root_idx:root_idx+1]).shape)
+                print((flatten_ra_chand_gt[:,palm_joints[1:]]-flatten_ra_chand_gt[:,root_idx:root_idx+1]).shape)#[bs,4,3]
+                print(torch.norm(flatten_ra_chand_out[:,palm_joints[1:]]-flatten_ra_chand_out[:,root_idx:root_idx+1],p=2,dim=-1).shape)
+                print(torch.norm(flatten_ra_chand_gt[:,palm_joints[1:]]-flatten_ra_chand_gt[:,root_idx:root_idx+1],p=2,dim=-1).shape)#[bs,4]
             
             assert (palm_size_out>0).all()
-            flatten_cent_chand_out=(1./palm_size_out)*palm_size_gt*flatten_cent_chand_out
+            flatten_ra_chand_out=(1./palm_size_out)*palm_size_gt*flatten_ra_chand_out
             
-        return_results[f"flatten_{tag}_ra_out"]=flatten_cent_chand_out
-        return_results[f"flatten_{tag}_ra_gt"]=flatten_cent_chand_gt
-        return_results[f"flatten_{tag}_pa_out"]=transform_by_align_a2b(flatten_cam_a=flatten_cent_chand_out,flatten_cam_b=flatten_cent_chand_gt)
+        return_results[f"flatten_{tag}_ra_out"]=flatten_ra_chand_out
+        #return_results[f"flatten_{tag}_ra_gt"]=flatten_ra_chand_gt
+        return_results[f"flatten_{tag}_pa_out"]=batch_compute_similarity_transform_torch(flatten_ra_chand_out,flatten_ra_chand_gt,valid_joints)#=transform_by_align_a2b(flatten_cam_a=flatten_ra_chand_out,flatten_cam_b=flatten_ra_chand_gt)#
     return return_results

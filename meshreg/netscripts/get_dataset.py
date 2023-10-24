@@ -72,6 +72,8 @@ def get_dataset_motion(
     shift_as_htt=False if "shift_as_htt" not in kwargs else kwargs["shift_as_htt"]
 
     aug_obsv_len=False if "aug_obsv_len" not in dict_is_aug else dict_is_aug["aug_obsv_len"]
+    const_obsv=0 if "const_obsv" not in dict_is_aug else dict_is_aug["const_obsv"]
+    const_pred=0 if "const_pred" not in dict_is_aug else dict_is_aug["const_pred"]
     aug_img=False if "aug_img" not in dict_is_aug else dict_is_aug["aug_img"]
 
 
@@ -97,7 +99,7 @@ def get_dataset_motion(
                                     split=split,
                                     view_id=view_id,
                                     mode=mode,
-                                    ntokens_per_seq=ntokens_per_clip,
+                                    ntokens_per_seq=16,#ntokens_per_clip,
                                     spacing=spacing,
                                     is_shifting_window=is_shifting_window,
                                     action_taxonomy_to_use=kwargs["action_taxonomy_to_use"],
@@ -112,7 +114,7 @@ def get_dataset_motion(
                                     split=split, 
                                     view_id=view_id,
                                     mode=mode,
-                                    ntokens_per_seq=ntokens_per_clip,
+                                    ntokens_per_seq=16,#ntokens_per_clip,
                                     spacing=spacing, 
                                     is_shifting_window=is_shifting_window,
                                     buf_sec=buf_sec,
@@ -133,6 +135,8 @@ def get_dataset_motion(
         spacing=spacing,
         nclips=nclips,
         nclips_dev=nclips_dev,
+        const_obsv=const_obsv,
+        const_pred=const_pred,
         aug_obsv_len=aug_obsv_len,
         aug_img=aug_img)
 

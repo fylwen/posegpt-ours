@@ -99,6 +99,9 @@ class TemporalNet(BasePerceptionBlock):
             self.model_bert.eval()
 
         self.img_h, self.img_w=270,540
+
+
+        self.obj_from_resnet=True
         
 
     def assign_ibe(self,model_ibe):
@@ -120,6 +123,15 @@ class TemporalNet(BasePerceptionBlock):
 
         flatten_resnet25d=batch_flatten["joints25d_resnet"].cuda()
         flatten_ncam_intr=batch_flatten["ncam_intr"].cuda()
+
+        if not self.obj_from_resnet:            
+            oname_gt=batch_flatten["obj_name"]
+            otokens_gt=open_clip.tokenizer.tokenize(oname_gt).cuda()
+            with torch.no_grad():
+                otokens_gt=self.model_bert.encode_text(otokens_gt).float()
+            otokens_gt/=otokens_gt.norm(dim=-1,keepdim=True)
+
+            flatten_object_feature=otokens_gt.clone()
         
         #augmentaion
         if is_train:
@@ -209,7 +221,7 @@ class TemporalNet(BasePerceptionBlock):
         losses.update(hand_losses)
 
         #Object label
-        flatten_olabel_feature=self.pout_to_olabel_embed(flatten_pout_feature)        
+        flatten_olabel_feature=self.pout_to_olabel_embed(flatten_pout_feature) if self.obj_from_resnet else batch0["obj_feature"]
         weights_olabel_loss=batch_flatten['valid_frame'].cuda().float()
 
         olabel_results,total_loss,olabel_losses=self.predict_object(flatten_sample=batch_flatten,

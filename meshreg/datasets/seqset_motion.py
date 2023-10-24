@@ -27,7 +27,9 @@ class SeqSet(Dataset):
             nclips,
             nclips_dev,
             aug_obsv_len,
-            aug_img,):
+            aug_img,
+            const_obsv=-1,
+            const_pred=-1):
         self.list_pose_datasets = list_pose_datasets
         self.list_pose_datasets_start=[0]
         for pose_dataset in self.list_pose_datasets:
@@ -40,6 +42,8 @@ class SeqSet(Dataset):
         self.aug_obsv_len=aug_obsv_len
         self.use_same_action=self.list_pose_datasets[0].mode=="context"
         
+        self.const_obsv=const_obsv
+        self.const_pred=const_pred
         self.ntokens_per_clip=ntokens_per_clip
         self.spacing=int(spacing)
         self.len_tokens=int(nclips*self.ntokens_per_clip)
@@ -238,20 +242,32 @@ class SeqSet(Dataset):
         sample = self.get_sample(pose_dataset,csample_info,assigned_action_name=assigned_action_name,txn=txn,verbose=verbose)# 
         assert csample_info["frame_idx"]==cframe_idx, "check frame_idx"
         sample['valid_frame'] = 1
+        sample["frame_since_action_start"]=max(0,cframe_idx-window_info["action_start_frame"])
+        
         space_augm = sample.pop("space_augm")
         color_augm = sample.pop("color_augm")
 
         samples=[sample]
-
-        len_obsv=  random.randint(2,self.ntokens_per_clip) if self.ntokens_per_clip>2 and self.aug_obsv_len and random.random()<0.25  else self.ntokens_per_clip
+        if False:
+            if self.aug_obsv_len:
+                len_obsv=random.randint(16, min(end_video-cframe_idx,self.ntokens_per_clip))
+                start_idx=16 if end_video-cframe_idx-len_obsv>16 else 1
+                len_pred=random.randint(start_idx, min(max(0,end_video-cframe_idx-len_obsv)+1,self.ntokens_per_clip))
+            else:
+                len_obsv=min(self.const_obsv,self.ntokens_per_clip)
+                len_pred=min(self.const_pred,self.ntokens_per_clip)
+        else:
+            len_obsv=  random.randint(2,self.ntokens_per_clip) if self.ntokens_per_clip>2 and self.aug_obsv_len and random.random()<0.25  else self.ntokens_per_clip
+            len_pred=self.ntokens_per_clip
+        
         for sample_idx in range(1,self.len_tokens):
-            if sample_idx in range(len_obsv,self.ntokens_per_clip):
+            if sample_idx in range(len_obsv,self.ntokens_per_clip) or sample_idx in range(self.ntokens_per_clip+len_pred,self.ntokens_per_clip*2):
                 fframe_idx=cframe_idx
             else:
                 fframe_idx=min(cframe_idx+self.spacing, end_video-1)
 
             #fetch next frame
-            fsample_info=pose_dataset.get_sample_info(window_info, fframe_idx,txn["action"])
+            fsample_info=pose_dataset.get_sample_info(window_info, fframe_idx, txn["action"])
             
             fut_valid_frame = fframe_idx-cframe_idx==self.spacing 
 
@@ -265,6 +281,7 @@ class SeqSet(Dataset):
 
             assert fsample_info["frame_idx"]==fframe_idx, "check frame_idx" 
             sample_fut_frame["valid_frame"] = fut_valid_frame
+            sample_fut_frame["frame_since_action_start"]=max(0,fframe_idx-window_info["action_start_frame"])
             samples.append(sample_fut_frame)
         return samples
 

@@ -44,7 +44,7 @@ class VAE(torch.nn.Module):
                                         normalize_before=True,
                                         return_intermediate=False)
  
-    def feed_encoder(self,batch_seq_enc_in_tokens,batch_seq_enc_mask_tokens, verbose): 
+    def feed_encoder(self,batch_seq_enc_in_tokens,batch_seq_enc_mask_tokens, verbose):
         batch_size=batch_seq_enc_in_tokens.shape[0]        
         batch_enc_in_mu=repeat(self.mid_token_mu_enc_in,'() n d -> b n d',b=batch_size)
         batch_enc_in_logvar=repeat(self.mid_token_logvar_enc_in,'() n d -> b n d',b=batch_size)
@@ -62,7 +62,7 @@ class VAE(torch.nn.Module):
                 batch_enc_in_mu.shape,batch_enc_in_logvar.shape,batch_enc_mask_global.shape)#[bs,num_mids,512],[bs,num_mids,512],[bs,num_mids]
             print('batch_seq_enc_in/batch_seq_enc_pe/batch_seq_enc_mask',
                 batch_seq_enc_in.shape,batch_seq_enc_pe.shape,batch_seq_enc_mask.shape)#[bs,2*num_mids+3*len_tokens,512]x2,[bs,2*num_mids+3*len_tokens]
-            print(batch_seq_enc_mask[:2])
+            print(batch_seq_enc_mask[0])
         
         
         batch_seq_enc_out, _ =self.encoder(src=batch_seq_enc_in, src_pos=batch_seq_enc_pe, key_padding_mask=batch_seq_enc_mask,verbose=False)      
@@ -74,7 +74,6 @@ class VAE(torch.nn.Module):
         if verbose:
             print("batch_seq_enc_out",batch_seq_enc_out.shape)#[bs,2*num_mids+3*len_tokens,512]
             print("batch_enc_out_mu/batch_enc_out_logvar/batch_seq_enc_out_tokens",batch_enc_out_mu.shape,batch_enc_out_logvar.shape,batch_seq_enc_out_tokens.shape)#[bs,num_mids,512],[bs,num_mids,512],[bs,3*len_tokens,512]
-
 
         return batch_enc_out_mu,batch_enc_out_logvar,batch_seq_enc_out_tokens
     
@@ -94,6 +93,7 @@ class VAE(torch.nn.Module):
             print('batch_seq_dec_mem/pe/mask',batch_seq_dec_mem.shape,batch_seq_dec_mem_pe.shape,batch_seq_dec_mem_mask.shape)
             #[bs,1+len_o,512]x2, [bs,1+len_o]; #[bs,1,dim]x2, [bs,1]
             print(batch_seq_dec_mem_mask[0]) 
+            print(batch_seq_dec_tgt_key_padding_mask[1])
             
         batch_seq_dec_out_tokens,_=self.decoder(tgt=batch_seq_dec_query, memory=batch_seq_dec_mem,\
                             tgt_key_padding_mask=batch_seq_dec_tgt_key_padding_mask, memory_key_padding_mask=batch_seq_dec_mem_mask, \

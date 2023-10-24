@@ -247,8 +247,8 @@ def aggregate_and_save(path_to_save,save_dict):
             pred_right_aligned.append(save_dict[f"pred{pid}_right_joints3d_ra_epe_mean"])
     np.savez(path_to_save,
             pred_left=pred_left,pred_right=pred_right,
-            pred_left_cent=pred_left_cent,pred_right_cent=pred_right_cent,
-            pred_left_aligned=pred_left_aligned,pred_right_aligned=pred_right_aligned)
+            pred_left_local=pred_left_cent,pred_right_local=pred_right_cent,
+            pred_left_ra=pred_left_aligned,pred_right_ra=pred_right_aligned)
 
 
 class MyVAE:
@@ -276,12 +276,12 @@ class MyVAE:
         rs_pred=rs_pred[:,:valid_len]
         num_samples,len_seq = rs_pred.shape[0], rs_pred.shape[1]
         
-        sum_dist=0
+        sum_dist=0.
         for i in range(1,num_samples):
             for j in range(0,i):
                 cdist=np.linalg.norm(rs_pred[i]-rs_pred[j],axis=-1)#coord-dim, [len_seq,joints]
-
                 sum_dist+=cdist.mean()
+
         return sum_dist/(num_samples*(num_samples-1)//2)
         
         
@@ -292,21 +292,18 @@ class MyVAE:
         batch_seq_weights=torch2numpy(batch_seq_weights)
         num_gts=batch_seq_gt.shape[0]
         
-
         for gtid in range(0,num_gts):
             if batch_seq_weights is not None and batch_seq_weights[gtid,-1]<1e-6:
-                assert False, "make sure last frame is valid!"
                 valid_len=np.sum(batch_seq_weights[gtid])
                 assert batch_seq_weights[gtid,valid_len-1]>0 and batch_seq_weights[gtid,valid_len]<1e-6
             else:
                 valid_len=batch_seq_weights.shape[1]
-                
+            
             self.sum_average_pose_error+=self.compute_pose_error(batch_rs_seq_out[gtid],batch_seq_gt[gtid,np.newaxis],frame_idx=None,valid_len=valid_len)
             self.sum_furthest_pose_error+=self.compute_pose_error(batch_rs_seq_out[gtid],batch_seq_gt[gtid,np.newaxis],frame_idx=valid_len-1,valid_len=valid_len)
             self.sum_average_pose_diversity+=self.compute_diversity(batch_rs_seq_out[gtid],valid_len=valid_len)
-                
+               
             self.cnt+=1
-            
 
     def aggregate(self):
         self.cnt=max(self.cnt,1)

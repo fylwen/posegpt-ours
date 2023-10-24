@@ -236,8 +236,8 @@ class ImageBlock(BasePerceptionBlock):
                                                     height=batch_flatten["image"].shape[2],
                                                     width=batch_flatten["image"].shape[3],
                                                     verbose=False)
-        
-        weights_hand_loss=batch_flatten["has_camera_and_image"].float().cuda()        
+                                                    
+        weights_hand_loss=torch.mul(batch_flatten["valid_frame"].float().cuda(),batch_flatten["has_camera_and_image"].float().cuda())
         hand_results,total_loss,hand_losses=self.recover_hand(flatten_sample=batch_flatten,
                                                             flatten_hpose_25d_3d=flatten_hpose_25d_3d,
                                                             weights=weights_hand_loss,
@@ -251,7 +251,7 @@ class ImageBlock(BasePerceptionBlock):
         results["obj_feature"]=flatten_olabel_feature
         
         if self.object_name2idx is not None:
-            weights_olabel_loss=batch_flatten["has_obj_and_image"].float().cuda()
+            weights_olabel_loss=torch.mul(batch_flatten["valid_frame"].float().cuda(),batch_flatten["has_obj_and_image"].float().cuda())
             olabel_results,total_loss,olabel_losses=self.predict_object(flatten_sample=batch_flatten,
                                                             flatten_features=flatten_olabel_feature,
                                                             weights=weights_olabel_loss,

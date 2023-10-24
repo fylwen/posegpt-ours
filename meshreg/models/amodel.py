@@ -79,6 +79,8 @@ class ContextNet(VAE):
         self.online_midpe=online_midpe
         self.noise_factor_midpe=noise_std
         self.allow_grad_to_pblock=allow_grad_to_pblock
+        
+        self.gt_ite0=True
 
 
     def assign_pblock(self,pblock):
@@ -171,7 +173,8 @@ class ContextNet(VAE):
             exit(0)
         return return_batch
     
-    def get_pblock_concat_inout_seq(self,batch,label,verbose=False):
+    def get_decode_motion_info(self,batch,verbose=False):
+        label="pred"
         batch_flatten_hand={}
         for name in ['cam_joints3d_left','cam_joints3d_right','R_cam2local_left','t_cam2local_left','R_cam2local_right','t_cam2local_right',\
                     'hand_size_left','hand_size_right','valid_joints_left','valid_joints_right']:
@@ -212,7 +215,7 @@ class ContextNet(VAE):
         if not already_batch0:        
             #reformat batch
             batch0=self.get_inputs_feature(batch,verbose)
-            batch_pdec_gt=self.get_pblock_concat_inout_seq(batch,"pred",verbose=verbose and False) if "obsv_clip_frame_hand_size_left" in batch else None
+            batch_pdec_gt=self.get_decode_motion_info(batch,verbose=verbose and False) if "obsv_clip_frame_hand_size_left" in batch else None
         else:
             batch0=batch
         
@@ -312,17 +315,14 @@ class ContextNet(VAE):
         #FC(CLIP)
         batch_aname_obsv_gt=batch0["obsv_batch_action_name"]
         results["batch_action_name_obsv"]=batch_aname_obsv_gt
-        batch_atokens_obsv_gt=open_clip.tokenizer.tokenize(batch_aname_obsv_gt).cuda()
-        with torch.no_grad():            
-            batch_atokens_obsv_gt=self.model_bert.encode_text(batch_atokens_obsv_gt).float()
-        batch_atokens_obsv_gt/=batch_atokens_obsv_gt.norm(dim=-1,keepdim=True)
+
+        batch_atokens_obsv_gt=compute_berts_for_strs(self.model_bert,batch_aname_obsv_gt,verbose)
         if verbose:
             print("****A-Enc GT Action: batch_aname_obsv_gt",len(batch_aname_obsv_gt),batch_aname_obsv_gt[-10:])
             print("batch_atokens_obsv_gt",batch_atokens_obsv_gt.shape,torch.abs(batch_atokens_obsv_gt.norm(dim=-1)-1.).max())#[bs,512]
 
         batch_atokens_obsv_gt=self.bert_to_latent(batch_atokens_obsv_gt.detach().clone())
         action_embedding=torch.transpose(self.bert_to_latent(torch.transpose(self.action_embedding,0,1).detach()),0,1)
-        #action_embedding=self.action_embedding
         if verbose:
             print("batch_atokens_obsv_gt",batch_atokens_obsv_gt.shape)#[bs,512]
             print("self.action_embedding/action_embedding",self.action_embedding.shape,action_embedding.shape)#[512,nembeddings],[512,nembeddings]
@@ -442,7 +442,7 @@ class ContextNet(VAE):
         if batch_pdec_gt is not None:
             #Examine hand loss and get hand output
             total_loss_motion,results_motion,losses_motion=self.generate_motion(batch0,batch_pdec_gt,batch_clip_adec_mid_pred,
-                                                        normalize_size_from_comp=not is_train,verbose=verbose)
+                                                        normalize_size_from_comp=not is_train,to_reparameterize=to_reparameterize,verbose=verbose)
             total_loss+=total_loss_motion
             results.update(results_motion)
             losses.update(losses_motion)
@@ -491,13 +491,29 @@ class ContextNet(VAE):
 
 
     
-    def generate_motion(self,batch0, batch_pdec_gt, batch_clip_adec_mid_pred, normalize_size_from_comp,verbose=False):
+    def generate_motion(self,batch0, batch_pdec_gt, batch_clip_adec_mid_pred, normalize_size_from_comp,to_reparameterize,verbose=False):
         losses,results={},{}
         total_loss= torch.Tensor([0]).cuda()
         batch_size=batch_clip_adec_mid_pred.shape[0]
 
         #And use Mid(Ad) to generate hand pose
         #reshape and unsqueeze to [bs*len_a,1,code_dim]
+        frames_append=0
+        if "batch_last_obsv_hand_comp" in batch_pdec_gt:
+            frames_append=self.model_pblock.ntokens_pred
+            assert batch_pdec_gt["batch_last_obsv_valid_frame"].bool().all()
+            
+            batch_last_obsv_penc_mid,batch_last_obsv_penc_logvar,_,_=self.model_pblock.feed_encoder(batch_pdec_gt["batch_last_obsv_hand_comp"],
+                                                                                                ~(batch_pdec_gt["batch_last_obsv_valid_frame"].bool()).cuda(),
+                                                                                                verbose=verbose)            
+            if to_reparameterize:
+                batch_last_obsv_penc_mid=self.reparameterize(mu=batch_last_obsv_penc_mid[:,0:1],logvar=batch_last_obsv_penc_logvar[:,0:1],factor=5.)
+            
+            batch_clip_adec_mid_pred=torch.cat((batch_last_obsv_penc_mid,batch_clip_adec_mid_pred),dim=1)            
+            if verbose:
+                print("batch_last_obsv_hand_comp/batch_last_obsv_valid_frame",batch_pdec_gt["batch_last_obsv_hand_comp"].shape,batch_pdec_gt["batch_last_obsv_valid_frame"].shape)#[bs,16,153],[bs,16]
+                print("batch_last_obsv_penc_mid/batch_clip_adec_mid_pred",batch_last_obsv_penc_mid.shape,batch_clip_adec_mid_pred.shape)#[bs,1,512],[bs,ntokens_pred+1,512]
+
         clip_frame_pdec_mem=torch.unsqueeze(torch.flatten(batch_clip_adec_mid_pred,start_dim=0,end_dim=1),1)
         clip_frame_pdec_mem_mask=torch.zeros(clip_frame_pdec_mem.shape[0],1,device=batch_clip_adec_mid_pred.device).bool()
         if verbose:
@@ -506,7 +522,7 @@ class ContextNet(VAE):
             print("clip_frame_pdec_mem_mask",clip_frame_pdec_mem_mask.shape)#[bs*len_a,1]
         
         #Pass P-Dec to get hand pose
-        clip_frame_pdec_hand_feature_out,clip_frame_pdec_hand_comp_out=self.model_pblock.feed_decoder(clip_frame_pdec_mem,clip_frame_pdec_mem_mask,verbose=verbose)
+        clip_frame_pdec_hand_feature_out,clip_frame_pdec_hand_comp_out=self.model_pblock.feed_decoder(clip_frame_pdec_mem,clip_frame_pdec_mem_mask)
         if verbose:
             print("****P-Dec out,clip_frame_pdec_hand_feature_out",clip_frame_pdec_hand_feature_out.shape)#[bs*len_a,len_p,512]
             print("clip_frame_pdec_hand_comp_out",clip_frame_pdec_hand_comp_out.shape)#[bs*len_a,len_p,144]
@@ -532,11 +548,12 @@ class ContextNet(VAE):
             
         
         #valid frames and features
-        batch_seq_valid_frames=torch.flatten(batch0["pred_batch_clip_frame_valid_frame"][:,1:].cuda().clone(),1,2)
-        batch_seq_comp_out=clip_frame_pdec_hand_comp_out.view(batch_size,self.ntokens_pred*self.model_pblock.ntokens_pred,-1)
+        
+        batch_seq_valid_frames=torch.flatten(batch0["pred_batch_clip_frame_valid_frame"][:,(0 if "batch_last_obsv_hand_comp" in batch_pdec_gt else 1):].cuda().clone(),1,2)
+        batch_seq_comp_out=clip_frame_pdec_hand_comp_out.view(batch_size,frames_append+self.ntokens_pred*self.model_pblock.ntokens_pred,-1)
         results["batch_seq_valid_frames_pred_token0"]=batch_seq_valid_frames[:,0:self.model_pblock.ntokens_pred].detach().clone()
 
-        d1,d2=batch_size,(self.ntokens_pred+1)*self.model_pblock.ntokens_pred
+        d1,d2=batch_size,(self.ntokens_pred+1)*self.model_pblock.ntokens_pred+frames_append
         batch_seq_comp_gt=batch_pdec_gt["flatten_hand_comp_gt"].view(d1,d2,-1)[:,self.model_pblock.ntokens_obsv:].clone()
         batch_seq_local2base_gt=batch_pdec_gt["flatten_local2base_gt"].view(d1,d2,-1)[:,self.model_pblock.ntokens_obsv:].clone()
         batch_seq_valid_features=batch_pdec_gt["flatten_valid_features"].view(d1,d2,-1)[:,self.model_pblock.ntokens_obsv:].clone()
@@ -555,9 +572,10 @@ class ContextNet(VAE):
         trans_info_pred={}
         for k in ['flatten_firstclip_R_base2cam_left','flatten_firstclip_t_base2cam_left','flatten_firstclip_R_base2cam_right','flatten_firstclip_t_base2cam_right']:
             trans_info_pred[k]=batch_pdec_gt[k]
-            
+                    
         #for checking the compute_hand_loss (check only the max element of hand_comp loss), no masked_placeholder, frame_dim discards the first frame,
         #verify_gt_comp=torch.flatten(batch0["pred_batch_clip_frame_hand_comp"][:,1:],0,1)
+
         
         total_loss_hand,results_hand,losses_hand=self.model_pblock.compute_hand_loss(batch_seq_comp_gt=batch_seq_comp_gt,#[:,1:], 
                                                             batch_seq_comp_out=batch_seq_comp_out,#batch_seq_comp_out,#verify_gt_comp[:,1:],
@@ -584,19 +602,28 @@ class ContextNet(VAE):
         
         
         for key in ["local","base","cam"]:
-            results[f"batch_seq_joints3d_in_{key}_cdpred_gt"]=batch_pdec_gt[f"flatten_joints3d_in_{key}_gt"].view(d1,d2,self.num_joints,3)/self.hand_scaling_factor
-            results[f"batch_seq_joints3d_in_{key}_pred_gt"]=results[f"batch_seq_joints3d_in_{key}_cdpred_gt"][:,self.model_pblock.ntokens_obsv:]
-            results[f"batch_seq_joints3d_in_{key}_pred_out"]=results_hand[f"batch_seq_joints3d_in_{key}_out"]/self.hand_scaling_factor
-            
-            results[f"batch_seq_joints3d_in_{key}_pred_gt_token0"]=results[f"batch_seq_joints3d_in_{key}_pred_gt"][:,0:self.model_pblock.ntokens_pred]
-            results[f"batch_seq_joints3d_in_{key}_pred_out_token0"]=results[f"batch_seq_joints3d_in_{key}_pred_out"][:,0:self.model_pblock.ntokens_pred]
+            if "batch_last_obsv_hand_comp" in batch_pdec_gt:
+                results[f"batch_seq_joints3d_in_{key}_cdpred_gt"]=batch_pdec_gt[f"flatten_joints3d_in_{key}_gt"].view(d1,d2,self.num_joints,3)[:,self.model_pblock.ntokens_obsv:]/self.hand_scaling_factor
+                results[f"batch_seq_joints3d_in_{key}_pred_gt"]=results[f"batch_seq_joints3d_in_{key}_cdpred_gt"]            
+            else:
+                results[f"batch_seq_joints3d_in_{key}_cdpred_gt"]=batch_pdec_gt[f"flatten_joints3d_in_{key}_gt"].view(d1,d2,self.num_joints,3)/self.hand_scaling_factor
+                results[f"batch_seq_joints3d_in_{key}_pred_gt"]=results[f"batch_seq_joints3d_in_{key}_cdpred_gt"][:,self.model_pblock.ntokens_obsv:]
+            results[f"batch_seq_joints3d_in_{key}_pred_out"]=results_hand[f"batch_seq_joints3d_in_{key}_out"]/self.hand_scaling_factor            
+            results[f"batch_seq_joints3d_in_{key}_pred_gt_token0"]=results[f"batch_seq_joints3d_in_{key}_pred_gt"][:,frames_append:frames_append+self.model_pblock.ntokens_pred]
+            results[f"batch_seq_joints3d_in_{key}_pred_out_token0"]=results[f"batch_seq_joints3d_in_{key}_pred_out"][:,frames_append:frames_append+self.model_pblock.ntokens_pred]
 
             if key in ["local","cam"]:
                 results[f"batch_seq_joints3d_in_{key}_obsv_gt"]=torch.flatten(batch0[f"obsv_batch_clip_frame_joints3d_in_{key}_gt"],1,2)/self.hand_scaling_factor
             if verbose:
-                print(key,torch.abs(results[f"batch_seq_joints3d_in_{key}_pred_gt"]-results[f"batch_seq_joints3d_in_{key}_pred_out"]).max())
-        
+                print(key,torch.abs(results[f"batch_seq_joints3d_in_{key}_pred_gt"][:,:16,2:21]-results[f"batch_seq_joints3d_in_{key}_pred_out"][:,:16,2:21]).max())
+                
         if verbose:
+            for k,v in results.items():
+                try:
+                    print(k,v.shape)
+                except:
+                    print(k,len(v))
+
             from meshreg.netscripts.utils import sample_vis_trj_dec
             from meshreg.datasets import ass101utils
             batch_clip_frame_imgs=torch.cat([batch0["obsv_clip_frame_image_vis"],batch0["pred_clip_frame_image_vis"]],dim=1)

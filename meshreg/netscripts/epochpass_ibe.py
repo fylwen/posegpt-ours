@@ -43,10 +43,9 @@ def epoch_pass(
     avg_meters = AverageMeters()
     evaluators_pred = {"left_joints3d":  MyMEPE(),"right_joints3d": MyMEPE()} 
     evaluators_pred_ra={"left_joints3d":  MyMEPE(),"right_joints3d": MyMEPE()}
-    evaluate_in_mano=False
-    if evaluate_in_mano:
-        evaluators_pred_local={"left_joints3d":  MyMEPE(),"right_joints3d": MyMEPE()}
-    valid_joints=list(range(0,21))#pose_dataset.valid_joints#
+    
+    evaluators_pred_local={"left_joints3d":  MyMEPE(),"right_joints3d": MyMEPE()}
+    valid_joints=pose_dataset.valid_joints#
 
     # Loop over dataset
     verbose=False
@@ -91,6 +90,23 @@ def epoch_pass(
             batch_seq_weights=results["valid_frames"].view(-1,1)
             feed_mymepe_evaluators_hands(evaluators_pred, batch_seq_cam_joints3d_pred, batch_seq_cam_joints3d_gt, batch_seq_weights, valid_joints=valid_joints)
             
+            '''
+            batch_seq_cam_joints3d_pred=batch_seq_cam_joints3d_pred.view(-1,16,42,3)
+            batch_seq_ra_joints3d_pred=batch_seq_cam_joints3d_pred.clone()
+            batch_seq_ra_joints3d_pred[:,:,:21]-=batch_seq_cam_joints3d_pred[:,0:1,0:1]
+            batch_seq_ra_joints3d_pred[:,:,21:]-=batch_seq_cam_joints3d_pred[:,0:1,21:22]
+            
+            batch_seq_cam_joints3d_gt=batch_seq_cam_joints3d_gt.view(-1,16,42,3)
+            batch_seq_ra_joints3d_gt=batch_seq_cam_joints3d_gt.clone()
+            
+            batch_seq_ra_joints3d_gt[:,:,:21]-=batch_seq_cam_joints3d_gt[:,0:1,0:1]
+            batch_seq_ra_joints3d_gt[:,:,21:]-=batch_seq_cam_joints3d_gt[:,0:1,21:22]
+            feed_mymepe_evaluators_hands(evaluators_pred_ra, 
+                                        torch.unsqueeze(torch.flatten(batch_seq_ra_joints3d_pred,0,1)[:batch_seq_weights.shape[0]],1), 
+                                        torch.unsqueeze(torch.flatten(batch_seq_ra_joints3d_gt,0,1)[:batch_seq_weights.shape[0]],1),
+                                        batch_seq_weights, valid_joints=valid_joints)#[1:])
+            '''
+
             batch_seq_ra_joints3d_pred=batch_seq_cam_joints3d_pred.clone()
             batch_seq_ra_joints3d_pred[:,:,:21]-=batch_seq_cam_joints3d_pred[:,:,0:1]
             batch_seq_ra_joints3d_pred[:,:,21:]-=batch_seq_cam_joints3d_pred[:,:,21:22]
@@ -98,13 +114,15 @@ def epoch_pass(
             batch_seq_ra_joints3d_gt=batch_seq_cam_joints3d_gt.clone()
             batch_seq_ra_joints3d_gt[:,:,:21]-=batch_seq_cam_joints3d_gt[:,:,0:1]
             batch_seq_ra_joints3d_gt[:,:,21:]-=batch_seq_cam_joints3d_gt[:,:,21:22]
+            
+            assert len(valid_joints)==20
+            res_flatten=compute_root_aligned_and_palmed_aligned(batch_seq_ra_joints3d_pred.view(-1,42,3), batch_seq_ra_joints3d_gt.view(-1,42,3), align_to_gt_size=True,valid_joints=valid_joints)
+            batch_seq_ra_joints3d_pred=torch.cat([res_flatten["flatten_left_ra_out"],res_flatten["flatten_right_ra_out"]],dim=1).view(batch_seq_ra_joints3d_pred.shape)
             feed_mymepe_evaluators_hands(evaluators_pred_ra, batch_seq_ra_joints3d_pred, batch_seq_ra_joints3d_gt, batch_seq_weights, valid_joints=valid_joints[1:])
+            
+            batch_seq_pa_joints3d_pred=torch.cat([res_flatten["flatten_left_pa_out"],res_flatten["flatten_right_pa_out"]],dim=1).view(batch_seq_ra_joints3d_pred.shape)            
+            feed_mymepe_evaluators_hands(evaluators_pred_local, batch_seq_pa_joints3d_pred, batch_seq_ra_joints3d_gt, batch_seq_weights, valid_joints=valid_joints)#[1:])
 
-            if evaluate_in_mano:
-                res_flatten=compute_root_aligned_and_palmed_aligned(batch_seq_ra_joints3d_pred.view(-1,42,3), batch_seq_ra_joints3d_gt.view(-1,42,3), align_to_gt_size=False)
-                batch_seq_local_joints3d_pred=torch.cat([res_flatten["flatten_left_pa_out"],res_flatten["flatten_right_pa_out"]],dim=-1).view(batch_seq_ra_joints3d_pred.shape)
-                batch_seq_local_joints3d_gt=torch.cat([res_flatten["flatten_left_ra_gt"],res_flatten["flatten_right_ra_gt"]],dim=-1).view(batch_seq_ra_joints3d_pred.shape)
-                feed_mymepe_evaluators_hands(evaluators_pred_local, batch_seq_local_joints3d_pred, batch_seq_local_joints3d_gt, batch_seq_weights, valid_joints=valid_joints[1:])
                 
             obj_evaluator.feed(gt_labels=results["obj_idx_gt"],pred_labels=results["obj_idx_out"],weights=results["valid_obj"])
             if "batch_action_idx_obsv_out" in results:
@@ -140,10 +158,10 @@ def epoch_pass(
         for eval_name, eval_res in evaluator_results.items():
             save_dict[f"pred_{eval_name}_ra_epe_mean"]=eval_res["epe_mean"]
                 
-        if evaluate_in_mano:
-            evaluator_results = evaluate.parse_evaluators(evaluators_pred_local)
-            for eval_name, eval_res in evaluator_results.items():
-                save_dict[f"pred_{eval_name}_local_epe_mean"]=eval_res["epe_mean"]
+                
+        evaluator_results = evaluate.parse_evaluators(evaluators_pred_local)
+        for eval_name, eval_res in evaluator_results.items():
+            save_dict[f"pred_{eval_name}_local_epe_mean"]=eval_res["epe_mean"]
 
 
     print("Epoch",epoch)

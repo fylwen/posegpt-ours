@@ -133,9 +133,12 @@ class MotionNet(VAE):
         
         #First make sure consistent valid_frame and valid_features
         batch_seq_valid_frame=batch0["valid_frame"].cuda().reshape(batch_size,self.ntokens_op)
+        
         if verbose:
             print("batch_seq_valid_features",batch0["batch_seq_valid_features"].shape)#[bs,len_op,153]
-        batch0["batch_seq_valid_features"]=torch.mul(batch0["batch_seq_valid_features"],torch.unsqueeze(batch_seq_valid_frame,-1))
+            
+        #The original version compute every frames loss
+        #batch0["batch_seq_valid_features"]=torch.mul(batch0["batch_seq_valid_features"],torch.unsqueeze(batch_seq_valid_frame,-1))
         if verbose:
             print("batch_seq_valid_features,unsqueeze(batch_seq_valid_frame)",batch0["batch_seq_valid_features"].shape,torch.unsqueeze(batch_seq_valid_frame,-1).shape)#[bs,len_op,153],[bs,len_op,1]
             print(torch.abs(torch.where(torch.sum(batch0["batch_seq_valid_features"],dim=-1)>0.,1,0)-batch_seq_valid_frame).max())
@@ -279,7 +282,8 @@ class MotionNet(VAE):
         return total_loss,results,losses
 
     
-    def batch_seq_from_comp_to_joints(self, batch_seq_comp,batch_mean_hand_size,trans_info, normalize_size_from_comp,batch_seq_valid_features=None, verbose=False):
+    def batch_seq_from_comp_to_joints(self, batch_seq_comp,batch_mean_hand_size,trans_info, normalize_size_from_comp, ensure_consistent_goal,
+                    batch_seq_valid_features=None, verbose=False):
         results={}
         batch_size,len_seq=batch_seq_comp.shape[0],batch_seq_comp.shape[1]
         hand_left_size=repeat(batch_mean_hand_size[0],'b ()-> b n',n=len_seq)
@@ -303,7 +307,7 @@ class MotionNet(VAE):
                 print("linalg",torch.linalg.norm(palm3d_left[:,1:]-palm3d_left[:,0:1],ord=2,dim=2,keepdim=False).shape)#[bs*len_seq,4]
                 print("left/right",left_size.shape,right_size.shape)#,left_size,right_size)#[bs*len_seq,1]
                 print("batch_seq_valid_features",batch_seq_valid_features.shape)#[bs,len_seq,len_comp]
-                print(batch_seq_valid_features[0,0])
+                
                 
             flatten_local_left/=left_size.view(-1,1,1)
             flatten_valid_features_left=batch_seq_valid_features[:,:,0:21*3].clone().view(-1,21,3)
@@ -320,7 +324,7 @@ class MotionNet(VAE):
         else:
             batch_seq_comp2=batch_seq_comp
 
-        flatten_out=from_comp_to_joints(batch_seq_comp2, flatten_mean_hand_size, factor_scaling=self.hand_scaling_factor,trans_info=trans_info)
+        flatten_out=from_comp_to_joints(batch_seq_comp2, flatten_mean_hand_size, factor_scaling=self.hand_scaling_factor,trans_info=trans_info,ensure_consistent_goal=ensure_consistent_goal)
         for key in ["base","cam","local"]:        
             results[f"batch_seq_joints3d_in_{key}"]=flatten_out[f"joints_in_{key}"].view(batch_size,len_seq,self.num_joints,3)
         results["batch_seq_local2base"]=flatten_out["local2base"].view(batch_size,len_seq,flatten_out["local2base"].shape[-1])
@@ -355,6 +359,7 @@ class MotionNet(VAE):
                                                         batch_mean_hand_size=batch_mean_hand_size,
                                                         trans_info=trans_info,
                                                         normalize_size_from_comp=normalize_size_from_comp, 
+                                                        ensure_consistent_goal=False,
                                                         batch_seq_valid_features=batch_seq_valid_features,
                                                         verbose=verbose)
         for k in output_results.keys():
@@ -380,7 +385,7 @@ class MotionNet(VAE):
     
 
     
-    def feed_encoder(self,batch_seq_enc_in_comp,batch_seq_enc_mask_tokens, batch_seq_enc_in_obj=None, batch_seq_enc_in_img=None, verbose=False):       
+    def feed_encoder(self,batch_seq_enc_in_comp,batch_seq_enc_mask_tokens, verbose=False):       
         if verbose:
             print("****Start P-Enc****")
         batch_seq_enc_in_tokens=torch.cat([self.pose3d_to_trsfm_in(batch_seq_enc_in_comp[:,:,:self.num_joints*3]), \
@@ -394,16 +399,21 @@ class MotionNet(VAE):
             print("batch_seq_enc_out_hand_tokens/batch_seq_enc_out_comp",batch_seq_enc_out_hand_tokens.shape,batch_seq_enc_out_comp.shape)#[bs,len_p,512],[bs,len_p,144]
             print("****End P-Enc****")
         return batch_enc_out_mu,batch_enc_out_logvar,batch_seq_enc_out_hand_tokens,batch_seq_enc_out_comp
+
+    
+    def feed_encoder_to_super(self,batch_seq_enc_in_tokens,batch_seq_enc_mask_tokens, verbose=False):       
+        return super().feed_encoder(batch_seq_enc_in_tokens,batch_seq_enc_mask_tokens,verbose)
     
 
 
-    def feed_decoder(self,batch_seq_dec_mem,batch_seq_dec_mem_mask,verbose):
+    def feed_decoder(self,batch_seq_dec_mem,batch_seq_dec_mem_mask,batch_seq_dec_query=None, batch_seq_dec_tgt_key_padding_mask=None, verbose=False):
         if verbose:
             print("****Start P-Dec****")
-        batch_seq_dec_out_tokens=super().feed_decoder(batch_seq_dec_query=None,
+        batch_seq_dec_out_tokens=super().feed_decoder(batch_seq_dec_query=batch_seq_dec_query,
                                                     batch_seq_dec_mem=batch_seq_dec_mem,
                                                     batch_seq_dec_mem_mask=batch_seq_dec_mem_mask,
-                                                    batch_seq_dec_tgt_key_padding_mask=None,verbose=verbose)
+                                                    batch_seq_dec_tgt_key_padding_mask=batch_seq_dec_tgt_key_padding_mask,
+                                                    verbose=verbose)
         
         batch_seq_dec_out_comp=self.token_out_to_pose(batch_seq_dec_out_tokens)
         if verbose:
@@ -439,7 +449,9 @@ class MotionNet(VAE):
                                                     batch_mean_hand_size=(batch_mean_hand_left_size,batch_mean_hand_right_size),
                                                     trans_info=trans_info_obsv, 
                                                     normalize_size_from_comp=False,
-                                                    batch_seq_valid_features=None, verbose=False)
+                                                    ensure_consistent_goal=False,
+                                                    batch_seq_valid_features=None, 
+                                                    verbose=False)
 
             for k in ["local","base","cam"]:
                 return_results[f"batch_seq_joints3d_in_{k}_out"]=return_results2[f"batch_seq_joints3d_in_{k}"]/self.hand_scaling_factor
