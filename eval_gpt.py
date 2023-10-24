@@ -138,7 +138,7 @@ class GTrainer(Trainer):
                 
                 batch_rs_seq_in_cam_pred_out=[]
                 batch_rs_seq_in_local_pred_out=[]
-                for rs_id in range(1):
+                for rs_id in range(21):
                     x=batch0["batch_seq_hand_comp_gt"]
                     valid=batch0["valid_frame"].view(-1,self.seq_len).cuda()
 
@@ -497,7 +497,10 @@ def main(args=None):
                        gen_eos=args.gen_eos,
                        seq_len=args.seq_len, 
                        loss_scaler=None)
-    tag_out=f"vis_{args.val_dataset}_{args.val_split}_view_id{args.val_view_id}_minwindow{args.min_window_sec}_seqlen{args.seq_len}"
+
+
+    ckpt_name=args.pretrained_ckpt.split("/")[-1][:-3]
+    tag_out=f"vis_{args.val_dataset}_{args.val_split}_view_id{args.val_view_id}_minwindow{args.min_window_sec}_seqlen{args.seq_len}_{ckpt_name}"
 
 
     model_fid=None
