@@ -120,7 +120,7 @@ class H2OHands(VanillaDataset):
         
         
         try:
-            self.env_midpe=lmdb.open(os.path.join(f'../lmdbsv2/h2o_midpe_world16x1@30fps_2sets_pdobsv',self.split),readonly=True,lock=False,readahead=False,meminit=False,\
+            self.env_midpe=lmdb.open(os.path.join(f'../lmdbsv2/h2o_midpe_world16x1@30fps',self.split),readonly=True,lock=False,readahead=False,meminit=False,\
                                 map_size=(1024)**3,max_spare_txns=32,max_dbs=1000)
         except:
             self.env_midpe=None

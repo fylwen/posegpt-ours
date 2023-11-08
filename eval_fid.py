@@ -148,8 +148,8 @@ def calculate_fid_for_two_distributions(args, nsamples=-1):
                     **kwargs)
 
 
-    path_pkl1="fid_ablate_flatten_bs32_cont_asshand_val_view-1_epoch100_96.pkl"
-    path_pkl2="fidgt_asshand_val_minwin2_ntokens112_3.pkl"
+    path_pkl1="fid_vis_asshand_val_view_id-1_minwindow1.0_seqlen112_ckpt_30.pkl"
+    path_pkl2="fidgt_asshand_val_minwin1_ntokens112_3.pkl"
 
     
     with open(path_pkl1, 'rb') as f:

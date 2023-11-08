@@ -507,7 +507,7 @@ class poseGPT(nn.Module):
         return index_sample
 
     @torch.no_grad()
-    def sample_poses(self, zidx, x, valid, actions_emb=None, seqlens_emb=None, temperature=None,
+    def sample_poses(self, zidx, x, valid, sample, actions_emb=None, seqlens_emb=None, temperature=None,
             top_k=None, cond_steps=0, return_index_sample=False, return_zidx=False):
         """ Sample indices then forward propagate the decoder and body model to get poses. """
         #actions_emb = self.actions_to_embeddings(actions, self.factor) if actions is not None else None
@@ -519,7 +519,7 @@ class poseGPT(nn.Module):
         #print("zidx/x/valid",zidx.shape,x.shape,valid.shape)#[bs,len_seq//2,n_cb],[bs,len_seq,153],[bs,len_seq]
         #print("actions_emb/seqlens_emb",actions_emb.shape,seqlens_emb.shape)#[bs,1,256],][bs,1,256]
 
-        index_sample = self.sample_indices(zidx, actions_emb, seqlens_emb, temperature, top_k, cond_steps, ward=False)
+        index_sample = self.sample_indices(zidx, actions_emb, seqlens_emb, temperature, top_k, cond_steps, ward=False,sample=sample)
         batch_seq_comp_out, batch_seq_valid = self.forward_from_indices(index_sample, return_valid=True, eos=-1)
 
         #trans = get_trans(delta_trans, valid=None)

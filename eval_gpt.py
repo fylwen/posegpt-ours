@@ -97,7 +97,7 @@ class GTrainer(Trainer):
         return_batch["batch_seq_len"]=(return_batch["valid_frame"].cuda().view(-1,self.seq_len)).sum(1)
 
         batch_seq_valid_frame=return_batch["valid_frame"].view(-1,self.seq_len,1)
-        batch_seq_valid_features=torch.mul(batch_seq_valid_features,batch_seq_valid_frame)
+        #batch_seq_valid_features=torch.mul(batch_seq_valid_features,batch_seq_valid_frame)#################################
         
         return_batch["batch_seq_hand_comp_gt"]=batch_seq_hand_comp_gt
         return_batch["batch_seq_valid_features"]=batch_seq_valid_features
@@ -134,6 +134,9 @@ class GTrainer(Trainer):
         save_dict_fid={"batch_action_name_obsv":[],"batch_enc_out_global_feature":[]}
         with torch.no_grad():
             for batch_idx,batch_flatten in enumerate(tqdm(data)):    
+                
+                #if batch_idx not in [53,102,103,78,81,123,84,96,109,161,117,171,259]:#[1,3,9,12,19,26]:
+                #    continue
                 batch0=self.get_gt_inputs_feature(batch_flatten)
                 
                 batch_rs_seq_in_cam_pred_out=[]
@@ -154,13 +157,14 @@ class GTrainer(Trainer):
 
                     len_obsv=self.base_frame_id+1
                     batch_seq_comp_out,batch_seq_valid_out=self.model.sample_poses(zidx,x=x, valid=valid, 
-                                        actions_emb=actions_emb,
-                                        seqlens_emb=seqlens_emb,
-                                        temperature=None,
-                                        top_k=20,
-                                        cond_steps=len_obsv//2,
-                                        return_index_sample=False,
-                                        return_zidx=False)
+                                                                    sample=rs_id>0,
+                                                                    actions_emb=actions_emb,
+                                                                    seqlens_emb=seqlens_emb,
+                                                                    temperature=None,
+                                                                    top_k=20,
+                                                                    cond_steps=len_obsv//2,
+                                                                    return_index_sample=False,
+                                                                    return_zidx=False)
                     
                     assert batch_seq_valid_out.all()
 
@@ -168,12 +172,40 @@ class GTrainer(Trainer):
                     for k in ['flatten_firstclip_R_base2cam_left',  'flatten_firstclip_t_base2cam_left', 'flatten_firstclip_R_base2cam_right', 'flatten_firstclip_t_base2cam_right']:
                         trans_info_pred[k]=batch0[k]
                     
-                    
-                    batch_mean_hand_size_left=torch.mean(batch0['hand_size_left'].view(-1,self.seq_len)[:,:len_obsv],dim=1,keepdim=True)
-                    batch_mean_hand_size_right=torch.mean(batch0['hand_size_right'].view(-1,self.seq_len)[:,:len_obsv],dim=1,keepdim=True)
 
                     
-                    results_hand=self.batch_seq_from_comp_to_joints(batch_seq_comp_out[:,len_obsv:],#
+                    flatten_local_left=batch_seq_comp_out[:,:,0:21*3].clone().view(-1,21,3)
+                    flatten_local_right=batch_seq_comp_out[:,:,21*3:42*3].clone().view(-1,21,3)
+
+
+                    if verbose:
+                        print("flatten_local_left,flatten_local_right",flatten_local_left.shape,flatten_local_right.shape)#[bs*len_seq,21,3]x2
+
+                    #again normalize output w.r.t. hand size
+                    palm_joints=[0,5,9,13,17]
+                    palm3d_left = flatten_local_left[:,palm_joints]
+                    palm3d_right = flatten_local_right[:,palm_joints]
+                    left_size=torch.mean(torch.linalg.norm(palm3d_left[:,1:]-palm3d_left[:,0:1],ord=2,dim=2,keepdim=False),dim=1,keepdim=True)
+                    right_size=torch.mean(torch.linalg.norm(palm3d_right[:,1:]-palm3d_right[:,0:1],ord=2,dim=2,keepdim=False),dim=1,keepdim=True)
+
+                            
+                    flatten_local_left/=left_size.view(-1,1,1)
+                    #batch_seq_valid_features=batch0["batch_seq_valid_features"]
+                    #flatten_valid_features_left=batch_seq_valid_features[:,:,0:21*3].clone().view(-1,21,3)
+                    #flatten_local_left=torch.where(flatten_valid_features_left>0.,flatten_local_left,self.placeholder_joints[:,:21])
+                    
+                    flatten_local_right/=right_size.view(-1,1,1)
+                    #flatten_valid_features_right=batch_seq_valid_features[:,:,21*3:42*3].clone().view(-1,21,3)
+                    #flatten_local_right=torch.where(flatten_valid_features_right>0.,flatten_local_right,self.placeholder_joints[:,21:])           
+
+                            
+                    batch_seq_comp_out2=torch.cat([flatten_local_left.view(-1,self.seq_len,63), 
+                                                    flatten_local_right.view(-1,self.seq_len,63), 
+                                                    batch_seq_comp_out[:,:,126:]],dim=2)
+
+                    batch_mean_hand_size_left=torch.mean(batch0['hand_size_left'].view(-1,self.seq_len)[:,:len_obsv],dim=1,keepdim=True)
+                    batch_mean_hand_size_right=torch.mean(batch0['hand_size_right'].view(-1,self.seq_len)[:,:len_obsv],dim=1,keepdim=True)
+                    results_hand=self.batch_seq_from_comp_to_joints(batch_seq_comp_out2[:,len_obsv:],#
                                                     batch_mean_hand_size=(batch_mean_hand_size_left,batch_mean_hand_size_right),
                                                     trans_info=trans_info_pred)
 
@@ -187,11 +219,24 @@ class GTrainer(Trainer):
                         results[f"batch_seq_joints3d_in_{k}_obsv_gt"]=joints3d_gt[:,:len_obsv]
                         results[f"batch_seq_joints3d_in_{k}_pred_gt"]=joints3d_gt[:,len_obsv:]
 
-                    batch_rs_seq_in_cam_pred_out.append(torch.unsqueeze(results["batch_seq_joints3d_in_cam_pred_out"],dim=1))
-                    batch_rs_seq_in_local_pred_out.append(torch.unsqueeze(results["batch_seq_joints3d_in_local_pred_out"],dim=1))
 
                     if rs_id==0:
                         batch_seq_weights=valid.view(-1,self.seq_len).float()[:,len_obsv:]
+
+                        '''
+                        batch_seq_joints3d_pred_out=results["batch_seq_joints3d_in_cam_pred_out"]
+                        print(batch_seq_joints3d_pred_out.shape)
+                        left=batch_seq_joints3d_pred_out[:,:,:21]
+                        palm_idx=[5,9,13,17]
+                        left_size=torch.mean(torch.norm(left[:,:,palm_idx]-left[:,:,0:1],dim=-1),dim=2)
+                        print(left_size)
+
+                        right=batch_seq_joints3d_pred_out[:,:,21:]
+                        right_size=torch.mean(torch.norm(right[:,:,palm_idx]-right[:,:,0:1],dim=-1),dim=2)
+                        print(right_size)
+                        exit(0)
+                        '''
+
                         feed_mymepe_evaluators_hands(evaluators_pred,results["batch_seq_joints3d_in_cam_pred_out"], 
                                             results["batch_seq_joints3d_in_cam_pred_gt"], 
                                             batch_seq_weights,valid_joints=valid_joints)
@@ -203,6 +248,9 @@ class GTrainer(Trainer):
 
                         batch_seq_in_cam_pred_gt=results["batch_seq_joints3d_in_cam_pred_gt"]
                         batch_seq_in_local_pred_gt=results["batch_seq_joints3d_in_local_pred_gt"]
+                    else:                        
+                        batch_rs_seq_in_cam_pred_out.append(torch.unsqueeze(results["batch_seq_joints3d_in_cam_pred_out"],dim=1))
+                        batch_rs_seq_in_local_pred_out.append(torch.unsqueeze(results["batch_seq_joints3d_in_local_pred_out"],dim=1))
                                         
                                         
                     if model_fid is not None:
@@ -229,8 +277,8 @@ class GTrainer(Trainer):
                     if "image_vis" in batch_flatten:
                         for sample_id in range(results["batch_seq_joints3d_in_cam_gt"].shape[0]):
                             cam_info={"intr":batch_flatten["cam_intr"][0].cpu().numpy(),"extr":np.eye(4)}
+                            print(batch_flatten["cam_intr"][0])
 
-                            rs_id=0
                             sample_vis_trj_dec(batch_seq_gt_cam=results["batch_seq_joints3d_in_cam_gt"], 
                                         batch_seq_est_cam=results["batch_seq_joints3d_in_cam_pred_out"], 
                                         batch_seq_gt_local=results["batch_seq_joints3d_in_local_gt"],#results["batch_seq_joints3d_in_local_gt"],
@@ -242,15 +290,17 @@ class GTrainer(Trainer):
                                         cam_info=cam_info,
                                         prefix_cache_img=f"./{tag_out}/imgs/", path_video=f"./{tag_out}"+'/{:04d}_{:02d}_{:02d}.avi'.format(batch_idx,sample_id,rs_id))
                 
-                if False and len(batch_rs_seq_in_cam_pred_out)>1:
+                if len(batch_rs_seq_in_cam_pred_out)>1:
                     batch_rs_seq_in_cam_pred_out=torch.cat(batch_rs_seq_in_cam_pred_out,dim=1)
                     batch_rs_seq_in_local_pred_out=torch.cat(batch_rs_seq_in_local_pred_out,dim=1)
                     print("batch_rs_seq_in_cam_pred_out",batch_rs_seq_in_cam_pred_out.shape)
                     print("batch_rs_seq_in_local_pred_out",batch_rs_seq_in_local_pred_out.shape)
+                    print(batch_seq_in_cam_pred_gt.shape)
+                    print(batch_seq_weights.shape)
                     feed_myvae_evaluator_hands(evaluator=evaluators_vae,batch_rs_seq_joints3d_out=batch_rs_seq_in_cam_pred_out, 
-                                    batch_seq_joints3d_gt=batch_seq_in_cam_pred_gt,batch_seq_weights=batch_seq_weights,valid_joints=valid_joints)
-                    feed_myvae_evaluator_hands(evaluator=evaluators_vae_local,batch_rs_seq_joints3d_out=batch_rs_seq_in_local_pred_out, 
-                                batch_seq_joints3d_gt=batch_seq_in_local_pred_gt,batch_seq_weights=batch_seq_weights,valid_joints=valid_joints[1:])
+                                    batch_seq_joints3d_gt=batch_seq_in_cam_pred_gt,batch_seq_weights=batch_seq_weights.int(),valid_joints=valid_joints)
+                    #feed_myvae_evaluator_hands(evaluator=evaluators_vae_local,batch_rs_seq_joints3d_out=batch_rs_seq_in_local_pred_out, 
+                    #            batch_seq_joints3d_gt=batch_seq_in_local_pred_gt,batch_seq_weights=batch_seq_weights,valid_joints=valid_joints[1:])
         
         save_dict={}
         evaluator_results= evaluate.parse_evaluators(evaluators_pred)
@@ -265,6 +315,8 @@ class GTrainer(Trainer):
             #for pid in range(ntokens_pred):
             #    save_dict[f"pred{pid}_{eval_name}_local_epe_mean"]=eval_res["per_frame_epe_mean"][pid]
         
+        for k,v in save_dict.items():
+            print(k,"{:.2f}".format(100*v))
         
         
         vae_results=evaluate.parse_evaluators(evaluators_vae)
@@ -274,16 +326,22 @@ class GTrainer(Trainer):
                 save_dict[eval_name+"_"+kk]=vv
                 print(kk,"{:.2f}".format(100*vv))
         
+        '''
         vae_results_local=evaluate.parse_evaluators(evaluators_vae_local)
         for eval_name,eval_res in vae_results_local.items():
             print(eval_name+"_local")
             for kk,vv in eval_res.items():
                 save_dict[eval_name+"_local_"+kk]=vv
                 print(kk,"{:.2f}".format(100*vv))
+        '''
         
         
-        for k,v in save_dict.items():
-            print(k,v)
+        print("ape")
+        print("{:.2f}/{:.2f}".format(100*save_dict["left_joints3d_ape"],100*save_dict["right_joints3d_ape"]))
+        print("fpe")
+        print("{:.2f}/{:.2f}".format(100*save_dict["left_joints3d_fpe"],100*save_dict["right_joints3d_fpe"]))
+        print("apd")
+        print("{:.2f}/{:.2f}".format(100*save_dict["left_joints3d_apd"],100*save_dict["right_joints3d_apd"]))
         
         if model_fid is not None:        
             for k in ["batch_enc_out_global_feature"]:

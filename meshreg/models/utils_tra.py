@@ -413,7 +413,7 @@ def from_comp_to_joints(batch_seq_comp,flatten_hand_size, factor_scaling, trans_
     for hid in range(0,num_hands):
         hand_tag="left" if hid==0 else "right"
         #recover in local frame, unit is meter*factor_scaling
-        hand_a=batch_seq_comp[:,:,hid*num_joints*dim_joint:(hid+1)*num_joints*dim_joint].reshape(bs*len_out,num_joints,dim_joint)
+        hand_a=batch_seq_comp[:,:,hid*num_joints*dim_joint:(hid+1)*num_joints*dim_joint].reshape(bs*len_out,num_joints,dim_joint)        
         hand_a=hand_a*flatten_hand_size[hid].view(-1,1,1).to(hand_a.device)*factor_scaling
         list_j3d_in_local.append(hand_a)
         
