@@ -33,7 +33,7 @@ from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 
 from meshreg.datasets import collate
 from meshreg.netscripts import reloadmodel,get_dataset
-from meshreg.netscripts.utils import sample_vis_trj_dec
+from meshreg.netscripts.utils import sample_vis_trj_dec, plot_on_image_opencv
 from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs############utils_tra
 from torch.utils.data._utils.collate import default_collate
 
@@ -133,9 +133,8 @@ class GTrainer(Trainer):
         
         save_dict_fid={"batch_action_name_obsv":[],"batch_enc_out_global_feature":[]}
         with torch.no_grad():
-            for batch_idx,batch_flatten in enumerate(tqdm(data)):    
-                
-                #if batch_idx not in [53,102,103,78,81,123,84,96,109,161,117,171,259]:#[1,3,9,12,19,26]:
+            for batch_idx,batch_flatten in enumerate(tqdm(data)):                    
+                #if batch_idx not in [171]:#[53,102,103,78,81,123,84,96,109,161,117,171,259]:#[1,3,9,12,19,26]:
                 #    continue
                 batch0=self.get_gt_inputs_feature(batch_flatten)
                 
@@ -275,10 +274,21 @@ class GTrainer(Trainer):
                     
                     
                     if "image_vis" in batch_flatten:
-                        for sample_id in range(results["batch_seq_joints3d_in_cam_gt"].shape[0]):
+                        for sample_id in range(1,2):#(results["batch_seq_joints3d_in_cam_gt"].shape[0]):
                             cam_info={"intr":batch_flatten["cam_intr"][0].cpu().numpy(),"extr":np.eye(4)}
                             print(batch_flatten["cam_intr"][0])
 
+                            tag_out="vis_v0"
+
+                            plot_on_image_opencv(batch_seq_gt_cam=results["batch_seq_joints3d_in_cam_gt"], 
+                                        batch_seq_est_cam=results["batch_seq_joints3d_in_cam_pred_out"], 
+                                        joint_links=joint_links,  
+                                        flatten_imgs=batch_flatten["image_vis"],
+                                        sample_id=sample_id,
+                                        cam_info=cam_info,
+                                        prefix_cache_img=f"./{tag_out}/imgs_{sample_id}/")
+
+                            '''
                             sample_vis_trj_dec(batch_seq_gt_cam=results["batch_seq_joints3d_in_cam_gt"], 
                                         batch_seq_est_cam=results["batch_seq_joints3d_in_cam_pred_out"], 
                                         batch_seq_gt_local=results["batch_seq_joints3d_in_local_gt"],#results["batch_seq_joints3d_in_local_gt"],
@@ -289,6 +299,7 @@ class GTrainer(Trainer):
                                         sample_id=sample_id,
                                         cam_info=cam_info,
                                         prefix_cache_img=f"./{tag_out}/imgs/", path_video=f"./{tag_out}"+'/{:04d}_{:02d}_{:02d}.avi'.format(batch_idx,sample_id,rs_id))
+                            '''
                 
                 if len(batch_rs_seq_in_cam_pred_out)>1:
                     batch_rs_seq_in_cam_pred_out=torch.cat(batch_rs_seq_in_cam_pred_out,dim=1)
@@ -338,8 +349,8 @@ class GTrainer(Trainer):
         
         print("ape")
         print("{:.2f}/{:.2f}".format(100*save_dict["left_joints3d_ape"],100*save_dict["right_joints3d_ape"]))
-        print("fpe")
-        print("{:.2f}/{:.2f}".format(100*save_dict["left_joints3d_fpe"],100*save_dict["right_joints3d_fpe"]))
+        #print("fpe")
+        #print("{:.2f}/{:.2f}".format(100*save_dict["left_joints3d_fpe"],100*save_dict["right_joints3d_fpe"]))
         print("apd")
         print("{:.2f}/{:.2f}".format(100*save_dict["left_joints3d_apd"],100*save_dict["right_joints3d_apd"]))
         

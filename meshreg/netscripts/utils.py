@@ -137,8 +137,15 @@ def sample_vis_trj_dec(batch_seq_gt_cam, batch_seq_est_cam, batch_gt_action_name
         axi.imshow(cimg) 
 
         axi.axis("off")
-        axi.set_title(f"Est. projection",fontsize=6)
         est_frame_id=frame_id+batch_seq_est_local.shape[1]-len_frames
+        err_str=""
+        if est_frame_id>=0:
+            err=np.linalg.norm(ctrj_est_cam[est_frame_id]-ctrj_gt_cam[gt_frame_id],axis=-1)
+            vis_left=[0]+list(range(2,21))
+            vis_right=[21]+list(range(23,42))
+            err_str="Err L/R {:.2f}/{:.2f}mm".format(err[vis_left].mean()*1000,err[vis_right].mean()*1000)
+            
+        axi.set_title(f"Est. {err_str}",fontsize=6)
         if est_frame_id>=0:
             #c=(0.,1.,1) if est_frame_id%45<15 else ((1.,0,1.) if est_frame_id%45>=15 and est_frame_id%45<30 else (1.,1.,0.))
             c=(0.,1.,1) if est_frame_id%(16*2)<16 else(1.,0,1.)#########
@@ -1171,3 +1178,102 @@ def sample_vis_trj_resnet(batch_seq_gt_cam, batch_seq_est_cam1, batch_seq_est_ca
         videoWriter.write(cimg)
     
     videoWriter.release()
+
+
+
+def overlay_segs_on_image_cv2(image,hand_pose,joint_links,color):
+    for l in joint_links:
+        for iid in range(0,len(l)-1):
+            start,end=l[iid],l[iid+1]
+            cv2.line(image, tuple(hand_pose[start].astype(np.int32)), tuple(hand_pose[end].astype(np.int32)), color, 2)
+    return image
+
+
+
+def plot_on_image_opencv(batch_seq_gt_cam, batch_seq_est_cam, joint_links, prefix_cache_img, sample_id, cam_info, flatten_imgs,
+                            batch_seq_gt_local=None, batch_seq_est_local=None, batch_seq_valid_frames_obsv=None,batch_seq_valid_frames_pred=None):
+
+    batch_seq_gt_cam=torch2numpy(batch_seq_gt_cam)
+    batch_seq_est_cam=torch2numpy(batch_seq_est_cam)
+    if batch_seq_gt_local is not None:
+        batch_seq_gt_local=torch2numpy(batch_seq_gt_local)
+        batch_seq_est_local=torch2numpy(batch_seq_est_local)
+    if batch_seq_valid_frames_obsv is not None:
+        batch_seq_valid_frames_obsv=torch2numpy(batch_seq_valid_frames_obsv)
+        batch_seq_valid_frames_pred=torch2numpy(batch_seq_valid_frames_pred)
+    flatten_imgs=torch2numpy(flatten_imgs)
+
+
+    batch_size, len_frames = batch_seq_gt_cam.shape[0],batch_seq_gt_cam.shape[1]
+    ctrj_gt_cam,ctrj_est_cam= batch_seq_gt_cam[sample_id],batch_seq_est_cam[sample_id]
+    if batch_seq_gt_local is not None:
+        ctrj_gt_local,ctrj_est_local=batch_seq_gt_local[sample_id],batch_seq_est_local[sample_id]
+    
+    dir_cache=os.path.dirname(os.path.join(prefix_cache_img,"{:02d}".format(sample_id),"0.png"))
+    if not os.path.exists(dir_cache):
+        os.makedirs(dir_cache)
+
+    
+
+    if batch_seq_valid_frames_obsv is None:
+        len_pred_actual=batch_seq_est_cam.shape[1]
+        len_obsv=len_frames-len_pred_actual
+        len_obsv_actual=len_obsv
+    else:
+        len_pred_actual=np.sum(batch_seq_valid_frames_pred[sample_id])
+        len_obsv_actual=np.sum(batch_seq_valid_frames_obsv[sample_id])
+        len_obsv=batch_seq_valid_frames_obsv.shape[1]
+        
+    output_frame_id=0
+    cimg=flatten_imgs[sample_id*len_frames+15].copy()
+    color_bar=np.zeros((66*5,20,3),dtype=np.uint8)+255
+
+    len_pred_actual=64
+    
+    cmap_est=cm.get_cmap('cool')        
+    for frame_id in range(len_obsv,len_obsv+len_pred_actual):#(0,len_obsv_actual): 
+        if (frame_id>=len_obsv_actual and frame_id<len_obsv) or frame_id>=len_obsv+len_pred_actual:
+            continue
+            
+        #cimg=flatten_imgs[sample_id*len_frames+frame_id].copy() 
+        
+
+        
+        gt_frame_id=frame_id#+batch_seq_gt_local.shape[1]-len_frames
+        cframe_gt_joints2d=project_hand_3d2img(ctrj_gt_cam[gt_frame_id]*1000,cam_info["intr"],cam_info["extr"])            
+        err_str=""        
+        est_frame_id=frame_id+batch_seq_est_cam.shape[1]-len_frames
+        if est_frame_id>=0:
+            err=np.linalg.norm(ctrj_est_cam[est_frame_id]-ctrj_gt_cam[gt_frame_id],axis=-1)
+            vis_left=[0]+list(range(2,21))
+            vis_right=[21]+list(range(23,42))
+            err_str="_L{:.2f}_R{:.2f}".format(err[vis_left].mean()*1000,err[vis_right].mean()*1000)
+            err_str=err_str.replace(".","_")
+        
+        
+
+
+        if est_frame_id>=0:
+            cframe_est_joints2d=project_hand_3d2img(ctrj_est_cam[est_frame_id]*1000,cam_info["intr"],cam_info["extr"])
+            color_=cmap_est(est_frame_id/66)#(255,0,0)
+            color=(int(color_[2]*255),int(color_[1]*255),int(color_[0]*255))
+            color_bar[est_frame_id*5:(est_frame_id+1)*5,:]=color
+            if est_frame_id==0:
+                pad=np.zeros_like(cimg)+255
+                cimg=cv2.addWeighted(cimg, 0.5, pad, 0.5, 0)
+            if est_frame_id%4==0:
+                cimg=overlay_segs_on_image_cv2(cimg,cframe_est_joints2d[:21],joint_links,color)
+                cimg=overlay_segs_on_image_cv2(cimg,cframe_est_joints2d[21:],joint_links,color)
+            output_frame_id+=1
+        else:
+            color=(0,255,0)
+            cimg=overlay_segs_on_image_cv2(cimg,cframe_gt_joints2d[:21],joint_links,color)
+            cimg=overlay_segs_on_image_cv2(cimg,cframe_gt_joints2d[21:],joint_links,color)
+            output_frame_id+=1
+
+    cimg=cimg[40:40+150,240:240+230].copy()
+    cv2.imwrite(os.path.join(prefix_cache_img,"{:02d}".format(sample_id),"{:02d}{:s}.png".format(output_frame_id,err_str)),cimg)
+    #cv2.imwrite("color_bar.png",color_bar)
+
+    exit(0)
+        
