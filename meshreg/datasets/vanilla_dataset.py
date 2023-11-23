@@ -22,8 +22,8 @@ class VanillaDataset(object):
         super().__init__()
 
         self.fps=30
-        self.all_queries=[BaseQueries.JOINTS3D,#BaseQueries.JOINTS2D,
-                          BaseQueries.ACTIONNAME,BaseQueries.OBJNAME, BaseQueries.IMAGE]#MIDPE]
+        self.all_queries=[BaseQueries.JOINTS3D,
+                          BaseQueries.ACTIONNAME,BaseQueries.OBJNAME]
         # get paired links as neighboured joints
         self.links = [
             (0, 2, 3, 4),

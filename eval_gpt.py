@@ -102,6 +102,7 @@ class GTrainer(Trainer):
         return_batch["batch_seq_hand_comp_gt"]=batch_seq_hand_comp_gt
         return_batch["batch_seq_valid_features"]=batch_seq_valid_features
 
+        #############################
         #first frame bug?
         #upper one set base_frame_id=0
         _, hand_gts = get_flatten_hand_feature(batch_flatten, 
@@ -147,14 +148,12 @@ class GTrainer(Trainer):
         
         save_dict_fid={"batch_action_name_obsv":[],"batch_enc_out_global_feature":[]}
         with torch.no_grad():
-            for batch_idx,batch_flatten in enumerate(tqdm(data)):                    
-                if batch_idx not in [109]:#[53,102,103,78,81,123,84,96,109,161,117,171,259]:#[1,3,9,12,19,26]:
-                    continue
+            for batch_idx,batch_flatten in enumerate(tqdm(data)): 
                 batch0=self.get_gt_inputs_feature(batch_flatten)
                 
                 batch_rs_seq_in_cam_pred_out=[]
                 batch_rs_seq_in_local_pred_out=[]
-                for rs_id in range(1):
+                for rs_id in range(21):
                     x=batch0["batch_seq_hand_comp_gt"]
                     valid=batch0["valid_frame"].view(-1,self.seq_len).cuda()
 
