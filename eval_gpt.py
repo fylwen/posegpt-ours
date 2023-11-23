@@ -33,7 +33,7 @@ from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 
 from meshreg.datasets import collate
 from meshreg.netscripts import reloadmodel,get_dataset
-from meshreg.netscripts.utils import sample_vis_trj_dec, plot_on_image_opencv
+from meshreg.netscripts.utils import sample_vis_trj_dec, plot_on_image_opencv, supple_video_vis_trj
 from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs############utils_tra
 from torch.utils.data._utils.collate import default_collate
 
@@ -82,7 +82,7 @@ class GTrainer(Trainer):
         flatten_comps, hand_gts = get_flatten_hand_feature(batch_flatten, 
                                         len_seq=self.seq_len, 
                                         spacing=1,
-                                        base_frame_id=self.base_frame_id,
+                                        base_frame_id=0,#self.base_frame_id,#############
                                         factor_scaling=self.hand_scaling_factor, 
                                         masked_placeholder=self.model.vqvae.placeholder_joints,
                                         with_augmentation=False,#is_train,
@@ -101,7 +101,21 @@ class GTrainer(Trainer):
         
         return_batch["batch_seq_hand_comp_gt"]=batch_seq_hand_comp_gt
         return_batch["batch_seq_valid_features"]=batch_seq_valid_features
+
+        #first frame bug?
+        #upper one set base_frame_id=0
+        _, hand_gts = get_flatten_hand_feature(batch_flatten, 
+                                len_seq=self.seq_len, 
+                                spacing=1,
+                                base_frame_id=self.base_frame_id,
+                                factor_scaling=self.hand_scaling_factor, 
+                                masked_placeholder=self.model.vqvae.placeholder_joints,
+                                with_augmentation=False,#is_train,
+                                compute_local2first=False,#True,
+                                verbose=verbose)
+            
         return_batch.update(hand_gts)
+        #end first frame bug
 
         if verbose:
             for k,v in return_batch.items():
@@ -134,13 +148,13 @@ class GTrainer(Trainer):
         save_dict_fid={"batch_action_name_obsv":[],"batch_enc_out_global_feature":[]}
         with torch.no_grad():
             for batch_idx,batch_flatten in enumerate(tqdm(data)):                    
-                #if batch_idx not in [171]:#[53,102,103,78,81,123,84,96,109,161,117,171,259]:#[1,3,9,12,19,26]:
-                #    continue
+                if batch_idx not in [109]:#[53,102,103,78,81,123,84,96,109,161,117,171,259]:#[1,3,9,12,19,26]:
+                    continue
                 batch0=self.get_gt_inputs_feature(batch_flatten)
                 
                 batch_rs_seq_in_cam_pred_out=[]
                 batch_rs_seq_in_local_pred_out=[]
-                for rs_id in range(21):
+                for rs_id in range(1):
                     x=batch0["batch_seq_hand_comp_gt"]
                     valid=batch0["valid_frame"].view(-1,self.seq_len).cuda()
 
@@ -274,12 +288,37 @@ class GTrainer(Trainer):
                     
                     
                     if "image_vis" in batch_flatten:
-                        for sample_id in range(1,2):#(results["batch_seq_joints3d_in_cam_gt"].shape[0]):
-                            cam_info={"intr":batch_flatten["cam_intr"][0].cpu().numpy(),"extr":np.eye(4)}
+                        num_obsv_frames=16
+                        batch_seq_joints3d_cam=torch.cat([results["batch_seq_joints3d_in_cam_gt"][:,:num_obsv_frames],results["batch_seq_joints3d_in_cam_pred_out"]],dim=1)
+                        batch_seq_valid_frames=valid.view(-1,self.seq_len)
+                        batch_seq_imgs=batch_flatten["image_vis"].view((batch_seq_joints3d_cam.shape[0],batch_seq_joints3d_cam.shape[1])+batch_flatten["image_vis"].shape[1:])
+
+                        print("check shape",batch_seq_joints3d_cam.shape,batch_seq_valid_frames.shape,batch_seq_imgs.shape)
+                            
+                        cam_info={"intr":batch_flatten["cam_intr"][0].cpu().numpy(),"extr":np.eye(4)}
+
+                        for sample_id in range(0,4):
+                            print(batch_idx,sample_id)
+                            #cam_info={"intr":np.array([[240.,0.0,240.],[0.0,240.0,135.],[0.0,0.0,1.0]],dtype=np.float32),"extr":np.eye(4)}
+                            #tag_out="6906"
+                            
+                            
                             print(batch_flatten["cam_intr"][0])
+                            tag_out="vis_posegpt"
 
-                            tag_out="vis_v0"
+                            supple_video_vis_trj(batch_seq_cam=batch_seq_joints3d_cam, 
+                                                batch_seq_valid_frames=batch_seq_valid_frames, 
+                                                batch_seq_imgs=batch_seq_imgs, 
+                                                batch_gt_action_name="nul",
+                                                joint_links=joint_links,
+                                                num_obsv_frames=num_obsv_frames, 
+                                                sample_id=sample_id,
+                                                cam_info=cam_info,
+                                                prefix_cache_img=f"./{tag_out}/imgs0/",
+                                                path_video=f"./{tag_out}/"+'alpha0_{:04d}_{:02d}_{:02d}.avi'.format(batch_idx,sample_id, rs_id))
+                            continue
 
+                            '''
                             plot_on_image_opencv(batch_seq_gt_cam=results["batch_seq_joints3d_in_cam_gt"], 
                                         batch_seq_est_cam=results["batch_seq_joints3d_in_cam_pred_out"], 
                                         joint_links=joint_links,  
@@ -299,7 +338,7 @@ class GTrainer(Trainer):
                                         sample_id=sample_id,
                                         cam_info=cam_info,
                                         prefix_cache_img=f"./{tag_out}/imgs/", path_video=f"./{tag_out}"+'/{:04d}_{:02d}_{:02d}.avi'.format(batch_idx,sample_id,rs_id))
-                            '''
+                            
                 
                 if len(batch_rs_seq_in_cam_pred_out)>1:
                     batch_rs_seq_in_cam_pred_out=torch.cat(batch_rs_seq_in_cam_pred_out,dim=1)

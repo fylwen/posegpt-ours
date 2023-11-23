@@ -16,10 +16,14 @@ CUDA_VISIBLE_DEVICES=1 python train_gpt.py  --name generator_tratrj1200 --n_code
 
 
 
-CUDA_VISIBLE_DEVICES=1 python eval_gpt.py  --name test --n_codebook 2 --n_e 512 --e_dim 256  --vq_model CausalVQVAE --hid_dim 384 --dropout 0   --model poseGPT --n_visu_to_save 2 --class_conditional 1 --gpt_blocksize 512 --gpt_nlayer 8 --gpt_nhead 4 --gpt_embd_pdrop 0. --gpt_resid_pdrop 0. --gpt_attn_pdrop 0. --gen_eos 0 --eval_fid 0 --eos_force 1 --seqlen_conditional 1 --embed_every_step 1 --concat_emb 1 --val_dataset asshand --val_split val --val_view_id 3 --min_window_sec 1. --pretrained_ckpt ../ckpts_panda/checkpoints/posegpt/generator_tratrj1200/checkpoints/ckpt_30.pt --batch_size 4 --seq_len 112 --vq_ckpt ../ckpts_panda/checkpoints/posegpt/autoencode_tratrj/checkpoints/ckpt_1200.pt  --fid_path   ../ckpts_panda/checkpoints/fidv3_bs128_9layers_256x1tokens_ahand_fine_verb_lr3e-5_decay100_0_5/checkpoint_300.pth
+CUDA_VISIBLE_DEVICES=0 python eval_gpt.py  --name test --n_codebook 2 --n_e 512 --e_dim 256  --vq_model CausalVQVAE --hid_dim 384 --dropout 0   --model poseGPT --n_visu_to_save 2 --class_conditional 1 --gpt_blocksize 512 --gpt_nlayer 8 --gpt_nhead 4 --gpt_embd_pdrop 0. --gpt_resid_pdrop 0. --gpt_attn_pdrop 0. --gen_eos 0 --eval_fid 0 --eos_force 1 --seqlen_conditional 1 --embed_every_step 1 --concat_emb 1 --val_dataset asshand --val_split val --val_view_id 4 --min_window_sec 1. --pretrained_ckpt ../ckpts_panda/checkpoints/posegpt/generator_tratrj1200/checkpoints/ckpt_30.pt --batch_size 4 --seq_len 112 --vq_ckpt ../ckpts_panda/checkpoints/posegpt/autoencode_tratrj/checkpoints/ckpt_1200.pt
 
 
-../ckpts_panda/checkpoints/fidv3_bs128_9layers_256x1tokens_h2o_decay400_0_5/checkpoint_1000.pth
+
+  --fid_path   ../ckpts_panda/checkpoints/fidv3_bs128_9layers_256x1tokens_h2o_decay400_0_5/checkpoint_1000.pth
+
+../ckpts_panda/checkpoints/fidv3_bs128_9layers_256x1tokens_ahand_fine_verb_lr3e-5_decay100_0_5/checkpoint_300.pth
+
 
 
 ../ckpts_panda/checkpoints/fidv3_bs128_9layers_256x1tokens_ahand_fine_verb_lr3e-5_decay100_0_5/checkpoint_300.pth

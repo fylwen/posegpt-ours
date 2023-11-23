@@ -1276,4 +1276,66 @@ def plot_on_image_opencv(batch_seq_gt_cam, batch_seq_est_cam, joint_links, prefi
     #cv2.imwrite("color_bar.png",color_bar)
 
     exit(0)
+
+
+
+def supple_video_vis_trj(batch_seq_cam, batch_seq_valid_frames, batch_seq_imgs, batch_gt_action_name, joint_links, prefix_cache_img, path_video, num_obsv_frames, sample_id, cam_info):
+    dir_cache=os.path.dirname(f"{prefix_cache_img}0.png")
+    if not os.path.exists(dir_cache):
+        os.makedirs(dir_cache)
+    dir_cache=os.path.dirname(path_video)
+    if not os.path.exists(dir_cache):
+        os.makedirs(dir_cache)
         
+        
+    batch_seq_cam=torch2numpy(batch_seq_cam)
+    batch_seq_valid_frames=torch2numpy(batch_seq_valid_frames)
+    batch_seq_imgs=torch2numpy(batch_seq_imgs)
+    
+    batch_size, len_frames =batch_seq_cam.shape[0],batch_seq_cam.shape[1]
+    ctrj_cam= batch_seq_cam[sample_id]
+    ctrj_valid=batch_seq_valid_frames[sample_id]
+    ctrj_img=batch_seq_imgs[sample_id]
+
+    len_frames=np.sum(ctrj_valid)
+    print("len frames",len_frames)
+    #len_frames+=8 ############# uncomment for transition
+
+    for frame_id in range(0,len_frames):
+        fig = plt.figure(figsize=(5,3))
+       
+        axi=fig.add_subplot(1,1,1)
+        axi.axis("off")
+        
+        title_tag=f"Frame #{frame_id}"
+        axi.set_title(title_tag,fontsize=14,pad=0)
+
+        if frame_id<num_obsv_frames:
+            cimg=ctrj_img[frame_id][:,:,::-1].copy() 
+            color=(0,1,0)
+        else:
+            cimg=ctrj_img[num_obsv_frames-1][:,:,::-1].copy()
+            color=(0,0,1)
+        
+        cimg2=np.zeros([300,480,3],dtype=np.uint8)+255
+        cimg2[0:cimg.shape[0],0:cimg.shape[1]]=cimg
+        cimg=cimg2
+        axi.imshow(cimg,alpha=0.9 if frame_id<num_obsv_frames else 0.3)
+
+        cframe_joints2d=project_hand_3d2img(ctrj_cam[frame_id]*1000,cam_info["intr"],cam_info["extr"])
+
+        visualize_joints_2d(axi, cframe_joints2d[:21],links=joint_links, alpha=1,linewidth=1.5,scatter=False, joint_idxs=False,color=[color]*5)
+        visualize_joints_2d(axi, cframe_joints2d[21:],links=joint_links, alpha=1,linewidth=1.5,scatter=False, joint_idxs=False,color=[color]*5)
+                 
+        fig.savefig(f"{prefix_cache_img}{frame_id}.png", dpi=200)
+        plt.close(fig)
+    
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')     
+    cimg=cv2.imread(f"{prefix_cache_img}0.png")
+    videoWriter = cv2.VideoWriter(path_video, fourcc, 10, (cimg.shape[1],cimg.shape[0]))  ##########
+
+    for frame_id in range(0,len_frames):
+        cimg=cv2.imread(f"{prefix_cache_img}{frame_id}.png")
+        videoWriter.write(cimg)
+    
+    videoWriter.release()

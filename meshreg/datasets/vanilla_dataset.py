@@ -23,7 +23,7 @@ class VanillaDataset(object):
 
         self.fps=30
         self.all_queries=[BaseQueries.JOINTS3D,#BaseQueries.JOINTS2D,
-                          BaseQueries.ACTIONNAME,BaseQueries.OBJNAME]#, BaseQueries.IMAGE]#MIDPE]
+                          BaseQueries.ACTIONNAME,BaseQueries.OBJNAME, BaseQueries.IMAGE]#MIDPE]
         # get paired links as neighboured joints
         self.links = [
             (0, 2, 3, 4),
