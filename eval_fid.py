@@ -26,7 +26,7 @@ from meshreg.models.fid_net import FIDNet
 
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import Dataset
-
+import open_clip
 plt.switch_backend("agg")
 
 
@@ -36,100 +36,6 @@ extend_queries = []
 def collate_fn(seq, extend_queries=extend_queries):
     return collate.seq_extend_flatten_collate(seq,extend_queries)#seq_extend_collate(seq, extend_queries)
 
-
-def main(args):
-    setseeds.set_all_seeds(args.manual_seed)
-    # Initialize hosting
-    now = datetime.now()
-    
-        
-
-    kwargs={"action_taxonomy_to_use": "fine", "load_untrimmed_videos": False, "view_ids":["e3"],"get_velocity": False,"max_samples":-1,"nclips_dev":args.nclips_dev}
-    print('**** Get val set from: ', args.val_dataset, args.val_split)
-
-    use_same_action=True
-    assert args.nclips_dev==0
-    
-    
-    val_dataset = get_dataset.get_dataset_motion([args.val_dataset],
-                    list_splits=[args.val_split],
-                    list_view_ids=[args.val_view_id],
-                    dataset_folder=args.dataset_folder,
-                    use_same_action=use_same_action,
-                    ntokens_per_clip=args.ntokens_per_clip*args.nclips_pred,
-                    spacing=args.spacing,
-                    nclips=1,
-                    min_window_sec=args.min_window_sec,
-                    is_shifting_window=False,
-                    dict_is_aug={},
-                    **kwargs)
-    
-    val_loader = get_dataset.DataLoaderX(val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=int(args.workers),
-        pin_memory=False,
-        drop_last=False,
-        collate_fn= collate_fn,)
-    
-    '''
-      
-    val_dataset = get_dataset.get_dataset_fid([args.val_dataset],
-                    list_splits=[args.val_split],
-                    dataset_folder=args.dataset_folder,
-                    spacing=args.spacing,
-                    capacity_ntokens=256,#args.ntokens_per_video,
-                    const_ntokens_obsv=256,#args.ntokens_per_video,
-                    all_queries=None,
-                    is_shifting_window=True,
-                    **kwargs,)    
-                                
-    val_loader = get_dataset.DataLoaderX(val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=int(args.workers),
-        pin_memory=False,
-        drop_last=False,
-        collate_fn= default_collate)#collate_fn,)###################
-    
-    '''
-    
-    model=FIDNet(transformer_d_model=args.hidden_dim,
-                        transformer_nhead=args.nheads,
-                        transformer_dim_feedforward=args.dim_feedforward,
-                        transformer_nlayers_enc=args.nlayers_enc,
-                        transformer_activation=args.transformer_activation,
-                        
-                        ntokens_per_video=args.nclips_pred*args.ntokens_per_clip,
-                        spacing=args.spacing, 
-                        code_loss="l1")
-
-
-    
-    epoch=reloadmodel.reload_model(model,args.resume_path) 
-    model=model.cuda()
-    model.compute_bert_embedding_for_taxonomy(val_dataset.list_pose_datasets,is_action=True,verbose=False)
-
-    freeze.freeze_batchnorm_stats(model)  # Freeze batchnorm 
-    
-    tag_to_save = f"{args.val_dataset}_{args.val_split}_minwin{int(args.min_window_sec)}_ntokens{args.nclips_pred*args.ntokens_per_clip}_3"
-    
-    
-    epochpass.epoch_pass_fid_eval_for_gt(val_loader,
-                                        model,
-                                        num_prefix_frames_to_remove=0,
-                                        tag_to_save=tag_to_save)
-    
-    '''
-    epochpass.epoch_pass_fid(val_loader,
-                        model,
-                        optimizer=None,
-                        scheduler=None,
-                        epoch=0,
-                        split_tag="val",
-                        tensorboard_writer=None)
-    '''
-    
 
 def calculate_fid_for_two_distributions(args, nsamples=-1):
     kwargs={"action_taxonomy_to_use": "fine", "load_untrimmed_videos": False, "view_ids":["e3"],"get_velocity": False,"max_samples":-1}    
@@ -148,8 +54,8 @@ def calculate_fid_for_two_distributions(args, nsamples=-1):
                     **kwargs)
 
 
-    path_pkl1="fid_vis_h2o_val_view_id-1_minwindow1.0_seqlen112_ckpt_30.pkl"
-    path_pkl2="fidgt_h2o_val_minwin1_ntokens112_3.pkl"
+    path_pkl1="fid_vis_h2o_test_view_id-1_minwindow1.0_seqlen112_ckpt_30.pkl"
+    path_pkl2="fidgt_h2o_test_minwin1_ntokens112_3.pkl"
 
     
     with open(path_pkl1, 'rb') as f:

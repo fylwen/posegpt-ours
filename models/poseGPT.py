@@ -21,8 +21,10 @@ from models.blocks.mingpt import Block, GPTConfig
 from models.blocks.sampling import sample_from_logits as _sample_from_logits
 from functools import partial
 
-
 import open_clip
+from meshreg.models.utils_tra import compute_bert_embedding_for_taxonomy
+import copy
+
 
 def freeze(model):
     for param in model.parameters():
@@ -270,6 +272,16 @@ class poseGPT(nn.Module):
         parser.add_argument("--causal_gpt", type=int, default=1, choices=[0,1])
         #parser.add_argument("--head_type", type=str, default='fc_wo_bias', choices=['fc_wo_bias', 'mlp'])
         return parser
+
+    def compute_bert_embedding_for_taxonomy(self, datasets, is_action,verbose=False):
+        name_to_idx,tokens=compute_bert_embedding_for_taxonomy(self.model_bert, datasets, is_action, verbose=verbose)
+        if is_action:
+            self.action_name2idx=copy.deepcopy(name_to_idx)
+            self.action_embedding=tokens.detach().clone()
+        else:
+            self.object_name2idx=copy.deepcopy(name_to_idx)
+            self.object_embedding=tokens.detach().clone()
+
 
 
     def indices_to_embeddings(self, index, zshape=None):

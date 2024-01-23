@@ -36,7 +36,7 @@ from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 
 from meshreg.datasets import collate
 from meshreg.netscripts import reloadmodel,get_dataset
-from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs
+from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs_batch
 from torch.utils.data._utils.collate import default_collate
 
 from distutils.dir_util import copy_tree
@@ -69,8 +69,11 @@ class GTrainer(Trainer):
         for key in ["valid_frame","hand_size_left","hand_size_right"]:
             return_batch[key]=batch_flatten[key].cuda()
             
-        return_batch["batch_action_name_obsv"]=[batch_flatten["action_name"][i] for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
-        return_batch["batch_action_name_embed"]=compute_berts_for_strs(self.model.model_bert, return_batch["batch_action_name_obsv"], verbose=verbose)
+        #return_batch["batch_action_name_obsv"]=[batch_flatten["action_name"][i] for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
+        #return_batch["batch_action_name_embed"]=compute_berts_for_strs(self.model.model_bert, return_batch["batch_action_name_obsv"], verbose=verbose)
+        return_batch_bert=compute_berts_for_strs_batch(batch_flatten, self.model, ntokens_op=self.seq_len, verbose=verbose)
+        return_batch.update(return_batch_bert)
+
 
         flatten_comps, hand_gts = get_flatten_hand_feature(batch_flatten, 
                                         len_seq=self.seq_len, 
@@ -444,6 +447,7 @@ def get_parsers_and_models(args):
 
 def get_data(args, user):
     train_loaders=[]
+    list_pose_datasets=[]
     kwargs={"action_taxonomy_to_use": "fine", "max_samples":-1}#,"e4"]}
     for tname,tsplit,tfactor in zip(args.train_datasets,args.train_splits,args.batch_size_factors):
         factor=int(np.array(args.batch_size_factors).sum()//tfactor)
@@ -460,6 +464,8 @@ def get_data(args, user):
                                     min_window_sec=16/30.*2,#(args.ntokens_per_clip*args.spacing/30.)*2,
                                     dict_is_aug={"aug_obsv_len":True},
                                     **kwargs,)
+
+        list_pose_datasets+=train_dataset.list_pose_datasets
             
         ctrain_loader=get_dataset.DataLoaderX(train_dataset,
                                         batch_size=args.train_batch_size//factor,
@@ -495,7 +501,7 @@ def get_data(args, user):
         drop_last=True,
         collate_fn=collate_fn,)
 
-    return loader_train, loader_val
+    return loader_train, loader_val, list_pose_datasets
 
 
 def main(args=None):
@@ -503,12 +509,13 @@ def main(args=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     user = get_user()
     parser, VQModel, Model = get_parsers_and_models(args)
-
+    
     args = parser.parse_args(args)
     #args.factor = np.prod(args.pool_kernel) # temporal downsampling
     args.factor = 2 if isinstance(args.n_layers, int) else 2 ** len(args.n_layers)
 
-    loader_train, loader_val = get_data(args, user)
+    loader_train, loader_val, list_pose_datasets = get_data(args, user)
+
 
     #known_dirs_to_classifier = {'babel': args.classif_ckpt_babel}
     #matching = [k for k in known_dirs_to_classifier.keys() if k in loader_train.dataset.data_dir]
@@ -541,8 +548,8 @@ def main(args=None):
         vq_model.quantizer.load_state(bins)
         
     model = Model(**vars(args), vqvae=vq_model).to(device)
-
     print(model)
+    model.compute_bert_embedding_for_taxonomy(list_pose_datasets,is_action=True,verbose=True)
 
     print("VQ model parameter count: ")
     print_parameters_count(model.vqvae, detailed=args.detailed_count, tag='VQ - ')

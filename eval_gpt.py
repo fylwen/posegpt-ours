@@ -34,7 +34,7 @@ from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 from meshreg.datasets import collate
 from meshreg.netscripts import reloadmodel,get_dataset
 from meshreg.netscripts.utils import sample_vis_trj_dec, plot_on_image_opencv, supple_video_vis_trj
-from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs############utils_tra
+from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs_batch############utils_tra
 from torch.utils.data._utils.collate import default_collate
 
 from meshreg.netscripts import position_evaluator as evaluate
@@ -74,10 +74,12 @@ class GTrainer(Trainer):
             return_batch[key]=batch_flatten[key].cuda()
 
             
-        return_batch["batch_action_name_obsv"]=[batch_flatten["action_name"][i] for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
+        #return_batch["batch_action_name_obsv"]=[batch_flatten["action_name"][i] for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
         
         #return_batch["batch_action_name_obsv"]=["open milk" for i in range(0,len(batch_flatten["action_name"]),self.seq_len)]
-        return_batch["batch_action_name_embed"]=compute_berts_for_strs(self.model.model_bert, return_batch["batch_action_name_obsv"], verbose=verbose)
+        #return_batch["batch_action_name_embed"]=compute_berts_for_strs(self.model.model_bert, return_batch["batch_action_name_obsv"], verbose=verbose)
+        return_batch_bert=compute_berts_for_strs_batch(batch_flatten, self.model, ntokens_op=self.seq_len, verbose=verbose)
+        return_batch.update(return_batch_bert)
 
         flatten_comps, hand_gts = get_flatten_hand_feature(batch_flatten, 
                                         len_seq=self.seq_len, 
@@ -546,7 +548,7 @@ def get_data(args, user):
         drop_last=False,
         collate_fn=collate_fn,)
 
-    return loader_val
+    return loader_val, val_dataset
 
 
 def main(args=None):
@@ -558,7 +560,7 @@ def main(args=None):
     args = parser.parse_args(args)
     args.factor = 2 if isinstance(args.n_layers, int) else 2 ** len(args.n_layers)
 
-    loader_val = get_data(args, user)
+    loader_val,val_dataset = get_data(args, user)
     print(f"\nBuilding the quantization model...")
     print(args)
 
@@ -578,6 +580,8 @@ def main(args=None):
         vq_model.quantizer.load_state(bins)
         
     model = Model(**vars(args), vqvae=vq_model).to(device)
+    model.compute_bert_embedding_for_taxonomy(val_dataset.list_pose_datasets,is_action=True,verbose=True)
+    
     print("VQ model parameter count: ")
     print_parameters_count(model.vqvae, detailed=args.detailed_count, tag='VQ - ')
     print("Transformer model parameter count: ")

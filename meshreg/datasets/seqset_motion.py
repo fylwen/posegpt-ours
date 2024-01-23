@@ -242,7 +242,8 @@ class SeqSet(Dataset):
         sample = self.get_sample(pose_dataset,csample_info,assigned_action_name=assigned_action_name,txn=txn,verbose=verbose)# 
         assert csample_info["frame_idx"]==cframe_idx, "check frame_idx"
         sample['valid_frame'] = 1
-        sample["frame_since_action_start"]=max(0,cframe_idx-window_info["action_start_frame"])
+        if "action_start_frame" in window_info:
+            sample["frame_since_action_start"]=max(0,cframe_idx-window_info["action_start_frame"])
         
         space_augm = sample.pop("space_augm")
         color_augm = sample.pop("color_augm")
@@ -281,7 +282,8 @@ class SeqSet(Dataset):
 
             assert fsample_info["frame_idx"]==fframe_idx, "check frame_idx" 
             sample_fut_frame["valid_frame"] = fut_valid_frame
-            sample_fut_frame["frame_since_action_start"]=max(0,fframe_idx-window_info["action_start_frame"])
+            if "action_start_frame" in window_info:
+                sample_fut_frame["frame_since_action_start"]=max(0,fframe_idx-window_info["action_start_frame"])
             samples.append(sample_fut_frame)
         return samples
 

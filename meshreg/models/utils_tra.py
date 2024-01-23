@@ -684,7 +684,7 @@ def solve_pnp_ransac_and_translate(cam1_joints3d,cam1_joints2d,cam2_K):
         return {"cam2_joints3d":cam2_joints3d,"t_ca2cb":t_ca2cb}
     
 
-def compute_bert_embedding_for_taxonomy(model_bert,datasets, is_action,verbose=False):
+def compute_bert_embedding_for_taxonomy(model_bert, datasets, is_action,verbose=False):
     name_to_idx={}
     for cset in datasets:
         key_sets= cset.action_to_idx.keys() if is_action else cset.object_to_idx.keys()
@@ -697,7 +697,6 @@ def compute_bert_embedding_for_taxonomy(model_bert,datasets, is_action,verbose=F
     list_name=list(name_to_idx.keys())
     tokens=compute_berts_for_strs(model_bert,list_name,verbose)
     tokens=torch.transpose(tokens,0,1)
-
     if verbose:
         print('Embedding-tokens',tokens.shape)#[512,-1]
     return name_to_idx,tokens
@@ -712,6 +711,19 @@ def compute_berts_for_strs(model_bert, list_strs, verbose=False):
         print("Bert-tokens",tokens.shape)#[-1,512]
     tokens/=tokens.norm(dim=-1,keepdim=True)    
     return tokens
+
+def compute_berts_for_strs_batch(batch, model, ntokens_op=1, model_bert=None, verbose=False):
+    batch_obsv_action_name=[batch["action_name"][idx] for idx in range(0,len(batch["action_name"]),ntokens_op)]
+    action_idxs=[model.action_name2idx[cname] if cname!="NIL" else -1 for cname in batch_obsv_action_name]    
+    return_batch={}
+    return_batch["batch_action_name_obsv"]=batch_obsv_action_name
+    return_batch["batch_action_name_embed"]=torch.transpose(model.action_embedding,1,0)[action_idxs]
+    if verbose:
+        print("return_batch[batch_action_name_embed]",return_batch["batch_action_name_embed"].shape)#[bs,512]
+        #obsv_batch_atokens2=compute_berts_for_strs(model_bert,batch_obsv_action_name,verbose)
+        #print("check obsv_batch_atokens",torch.abs(batch["obsv_batch_atokens"]-obsv_batch_atokens2).max())
+
+    return return_batch
 
 
 def embedding_lookup(query, embedding, verbose=False):
