@@ -192,7 +192,7 @@ def parse_evaluators(evaluators, config=None):
 class MyMEPE:
     def __init__(self):
         self.sum_hand_error=None
-        self.num_samples=None#list_hand_error=[]
+        self.num_samples=None
     
     def feed(self,batch_seq_pred3d,batch_seq_gt3d, batch_seq_weights):
         if self.sum_hand_error is None:
@@ -207,7 +207,7 @@ class MyMEPE:
             cdist=batch_seq_dist[idx].mean(axis=-1)#joint-wise,[len_seq]
             cweight=np.ones_like(cdist)  if batch_seq_weights is None else batch_seq_weights[idx]
             self.sum_hand_error+=np.multiply(cdist,cweight)
-            self.num_samples+=cweight#batch_seq_weights[idx]
+            self.num_samples+=cweight
 
     def aggregate(self):
         self.num_samples=np.where(self.num_samples<1,1,self.num_samples)#max(1,self.num_samples)
@@ -225,8 +225,7 @@ def feed_mymepe_evaluators_hands(evaluator,batch_seq_joints3d_out, batch_seq_joi
         batch_seq_cgt=batch_seq_joints3d_gt[:,:,hid*21:(hid+1)*21]
         batch_seq_cout=batch_seq_joints3d_out[:,:,hid*21:(hid+1)*21]
             
-        tag="left_" if hid==0 else "right_"
-        
+        tag="left_" if hid==0 else "right_"        
         if valid_joints is not None:
             batch_seq_cgt=torch.cat([batch_seq_cgt[:,:,idx:idx+1] for idx in valid_joints],2)
             batch_seq_cout=torch.cat([batch_seq_cout[:,:,idx:idx+1] for idx in valid_joints],2)

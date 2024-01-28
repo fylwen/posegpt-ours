@@ -33,7 +33,8 @@ from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 
 
 from meshreg.datasets import collate
-from meshreg.netscripts import reloadmodel,get_dataset
+from meshreg.netscripts import reloadmodel, get_dataset
+from meshreg.netscripts.timer import Timer
 from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt
 from torch.utils.data._utils.collate import default_collate
 
@@ -315,13 +316,22 @@ class QTrainer(Trainer):
         """ Do a pass on the dataset; sometimes log statistics"""
         self.model.train()
 
-        data_time, batch_time, max_mem = [AverageMeter(k, ':6.3f') for k in ['data_time', 'batch_time', 'max_mem']]
-        average_meters = {'data_time': data_time, 'batch_time': batch_time}
+        #data_time, batch_time, max_mem = [AverageMeter(k, ':6.3f') for k in ['data_time', 'batch_time', 'max_mem']]
+        average_meters = {}#'data_time': data_time, 'batch_time': batch_time}
 
-        end = time.time()
+        #end = time.time()
         print(red("> Training auto-encoder..."))
-        for batch_idx, batch_flatten in enumerate(tqdm(data)):
-            data_time.update(time.time() - end)
+        
+        epoch_fetch_timer = Timer()
+        epoch_gpu_timer = Timer()
+        epoch_eval_timer= Timer()
+        epoch_fetch_timer.tic()
+    
+        for batch_idx, batch_flatten in enumerate(tqdm(data)):            
+            #batch0=self.get_gt_inputs_feature(batch_flatten,verbose=False)
+            epoch_fetch_timer.toc()         
+            epoch_gpu_timer.tic()
+            #data_time.update(time.time() - end)
 
             # Input preparation
             #x, valid = x.to(self.device), valid.to(self.device)
@@ -349,16 +359,26 @@ class QTrainer(Trainer):
                 self.optimizer.step()
 
             # Track time and memory
-            batch_time.update(time.time() - end)
-            max_mem.update(torch.cuda.max_memory_allocated() / (MB))
-            end = time.time()
+            #batch_time.update(time.time() - end)
+            #max_mem.update(torch.cuda.max_memory_allocated() / (MB))
+            #end = time.time()
+
+            epoch_gpu_timer.toc()
+            epoch_eval_timer.tic()
 
             # Update metrics
-            if len(average_meters) == 2:
+            if True:#len(average_meters) == 2:
                 average_meters.update({k: AverageMeter(k, ':6.3f') for k in statistics.keys()})
             for k in statistics.keys():
                 average_meters[k].update(statistics[k].mean())
             self.current_iter += 1
+
+            epoch_eval_timer.toc()       
+            timer_log=['fetch batch: {:.2f}s/batch'.format(epoch_fetch_timer.average_time),
+                  'on gpu: {:.2f}s/batch'.format(epoch_gpu_timer.average_time),
+                  'postprocess: {:.2f}s/batch'.format(epoch_eval_timer.average_time)]
+            print(timer_log)
+            epoch_fetch_timer.tic()
 
         for k, v in average_meters.items():
             if 'nll' in k or 'total' in k:

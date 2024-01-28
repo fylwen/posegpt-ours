@@ -34,7 +34,7 @@ from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 from meshreg.datasets import collate
 from meshreg.netscripts import reloadmodel,get_dataset
 from meshreg.netscripts.utils import sample_vis_trj_dec, plot_on_image_opencv, supple_video_vis_trj
-from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs_batch############utils_tra
+from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs_batch,compute_root_aligned_and_palmed_aligned############utils_tra
 from torch.utils.data._utils.collate import default_collate
 
 from meshreg.netscripts import position_evaluator as evaluate
@@ -134,9 +134,10 @@ class GTrainer(Trainer):
         self.model.eval()
         self.model.vqvae.eval()
         evaluators_pred = {"left_joints3d":  MyMEPE(),"right_joints3d": MyMEPE()} 
+        evaluators_pred_ra = {"left_joints3d":  MyMEPE(),"right_joints3d": MyMEPE()} 
         evaluators_pred_local = {"left_joints3d":  MyMEPE(),"right_joints3d": MyMEPE()}
 
-        evaluators_vae = {"left_joints3d":  MyVAE(),"right_joints3d": MyVAE()}
+        evaluators_vae = {"left_joints3d":  MyVAE(mode="best"),"right_joints3d": MyVAE(mode="best")}
         evaluators_vae_local = {"left_joints3d":  MyVAE(),"right_joints3d": MyVAE()}    
 
 
@@ -155,7 +156,7 @@ class GTrainer(Trainer):
                 
                 batch_rs_seq_in_cam_pred_out=[]
                 batch_rs_seq_in_local_pred_out=[]
-                for rs_id in range(21):
+                for rs_id in range(1):
                     x=batch0["batch_seq_hand_comp_gt"]
                     valid=batch0["valid_frame"].view(-1,self.seq_len).cuda()
 
@@ -180,7 +181,7 @@ class GTrainer(Trainer):
                                                                     return_index_sample=False,
                                                                     return_zidx=False)
                     
-                    assert batch_seq_valid_out.all()
+                    #assert batch_seq_valid_out.all()
 
                     trans_info_pred={}
                     for k in ['flatten_firstclip_R_base2cam_left',  'flatten_firstclip_t_base2cam_left', 'flatten_firstclip_R_base2cam_right', 'flatten_firstclip_t_base2cam_right']:
@@ -255,10 +256,36 @@ class GTrainer(Trainer):
                                             results["batch_seq_joints3d_in_cam_pred_gt"], 
                                             batch_seq_weights,valid_joints=valid_joints)
 
+                        ##############
+                        batch_seq_cam_joints3d_pred_gt=results["batch_seq_joints3d_in_cam_pred_gt"]#[:,:ntokens_pred]
+                        batch_seq_ra_joints3d_pred_gt= batch_seq_cam_joints3d_pred_gt.clone()
+                        batch_seq_ra_joints3d_pred_gt[:,:,:21]-=batch_seq_cam_joints3d_pred_gt[:,:,0:1]
+                        batch_seq_ra_joints3d_pred_gt[:,:,21:]-=batch_seq_cam_joints3d_pred_gt[:,:,21:22]
 
-                        feed_mymepe_evaluators_hands(evaluators_pred_local,results["batch_seq_joints3d_in_local_pred_out"], 
-                                            results["batch_seq_joints3d_in_local_pred_gt"], 
-                                        batch_seq_weights,valid_joints=valid_joints)#[1:])
+                        batch_seq_cam_joints3d_pred_out=results["batch_seq_joints3d_in_cam_pred_out"]#[:,:ntokens_pred]
+                        batch_seq_ra_joints3d_pred_out=batch_seq_cam_joints3d_pred_out.clone()
+                        batch_seq_ra_joints3d_pred_out[:,:,:21]-=batch_seq_cam_joints3d_pred_out[:,:,0:1]
+                        batch_seq_ra_joints3d_pred_out[:,:,21:]-=batch_seq_cam_joints3d_pred_out[:,:,21:22]
+                        
+
+                        res_flatten=compute_root_aligned_and_palmed_aligned(batch_seq_ra_joints3d_pred_out.view(-1,42,3), 
+                                                                        batch_seq_ra_joints3d_pred_gt.view(-1,42,3), 
+                                                                        align_to_gt_size=True,
+                                                                        valid_joints=valid_joints,)
+                        
+                        batch_seq_ra_joints3d_pred_out=torch.cat([res_flatten["flatten_left_ra_out"],res_flatten["flatten_right_ra_out"]],dim=1).view(batch_seq_ra_joints3d_pred_out.shape)
+                        feed_mymepe_evaluators_hands(evaluators_pred_ra,batch_seq_ra_joints3d_pred_out, \
+                                    batch_seq_ra_joints3d_pred_gt, batch_seq_weights, valid_joints=valid_joints[1:])
+
+
+                        batch_seq_pa_joints3d_pred_out=torch.cat([res_flatten["flatten_left_pa_out"],res_flatten["flatten_right_pa_out"]],dim=1).view(batch_seq_ra_joints3d_pred_out.shape)    
+                        feed_mymepe_evaluators_hands(evaluators_pred_local,batch_seq_pa_joints3d_pred_out, \
+                                    batch_seq_ra_joints3d_pred_gt, batch_seq_weights, valid_joints=valid_joints)
+
+
+                        #feed_mymepe_evaluators_hands(evaluators_pred_local,results["batch_seq_joints3d_in_local_pred_out"], 
+                        #                    results["batch_seq_joints3d_in_local_pred_gt"], 
+                        #                batch_seq_weights,valid_joints=valid_joints)#[1:])
 
                         batch_seq_in_cam_pred_gt=results["batch_seq_joints3d_in_cam_pred_gt"]
                         batch_seq_in_local_pred_gt=results["batch_seq_joints3d_in_local_pred_gt"]
@@ -305,7 +332,7 @@ class GTrainer(Trainer):
                             
                             
                             print(batch_flatten["cam_intr"][0])
-                            tag_out="vis_posegpt"
+                            tag_out=f"posegpt_{self.base_frame_id}"
 
                             supple_video_vis_trj(batch_seq_cam=batch_seq_joints3d_cam, 
                                                 batch_seq_valid_frames=batch_seq_valid_frames, 
@@ -352,22 +379,43 @@ class GTrainer(Trainer):
                                     batch_seq_joints3d_gt=batch_seq_in_cam_pred_gt,batch_seq_weights=batch_seq_weights.int(),valid_joints=valid_joints)
                     #feed_myvae_evaluator_hands(evaluator=evaluators_vae_local,batch_rs_seq_joints3d_out=batch_rs_seq_in_local_pred_out, 
                     #            batch_seq_joints3d_gt=batch_seq_in_local_pred_gt,batch_seq_weights=batch_seq_weights,valid_joints=valid_joints[1:])
-        
+        ntokens_pred=self.seq_len-self.base_frame_id-1
         save_dict={}
         evaluator_results= evaluate.parse_evaluators(evaluators_pred)
         for eval_name, eval_res in evaluator_results.items():
             save_dict[f"pred_{eval_name}_epe_mean"]=eval_res["epe_mean"]
-            #for pid in range(ntokens_pred):
-            #    save_dict[f"pred{pid}_{eval_name}_epe_mean"]=eval_res["per_frame_epe_mean"][pid]
+            for pid in range(ntokens_pred):
+                save_dict[f"pred{pid}_{eval_name}_epe_mean"]=eval_res["per_frame_epe_mean"][pid]
 
+        evaluator_results= evaluate.parse_evaluators(evaluators_pred_ra)
+        for eval_name, eval_res in evaluator_results.items():
+            save_dict[f"pred_{eval_name}_ra_epe_mean"]=eval_res["epe_mean"]
+            for pid in range(ntokens_pred):
+                save_dict[f"pred{pid}_{eval_name}_ra_epe_mean"]=eval_res["per_frame_epe_mean"][pid]
+                
         evaluator_results= evaluate.parse_evaluators(evaluators_pred_local)
         for eval_name, eval_res in evaluator_results.items():
             save_dict[f"pred_{eval_name}_local_epe_mean"]=eval_res["epe_mean"]
-            #for pid in range(ntokens_pred):
-            #    save_dict[f"pred{pid}_{eval_name}_local_epe_mean"]=eval_res["per_frame_epe_mean"][pid]
+            for pid in range(ntokens_pred):
+                save_dict[f"pred{pid}_{eval_name}_local_epe_mean"]=eval_res["per_frame_epe_mean"][pid]
         
-        for k,v in save_dict.items():
-            print(k,"{:.2f}".format(100*v))
+        
+        #tag_out="posegpt_{:d}_{:d}".format(self.base_frame_id+1,ntokens_pred)
+        save_dict["ntokens_pred"]=ntokens_pred
+        evaluate.aggregate_and_save(f"../code_multi/{tag_out}.npz",save_dict)
+
+        
+        ######################    
+        print("Mean w/o sampling\n {:.2f}/{:.2f}/{:.2f}/{:.2f}/{:.2f}/{:.2f}".format(100*save_dict["pred_left_joints3d_epe_mean"],100*save_dict["pred_right_joints3d_epe_mean"],
+                                100*save_dict["pred_left_joints3d_ra_epe_mean"],100*save_dict["pred_right_joints3d_ra_epe_mean"],
+                                100*save_dict["pred_left_joints3d_local_epe_mean"],100*save_dict["pred_right_joints3d_local_epe_mean"]))
+        pid=ntokens_pred-1
+        print("pred #{:d}\n {:.2f}/{:.2f}/{:.2f}/{:.2f}/{:.2f}/{:.2f}".format(pid, 100*save_dict[f"pred{pid}_left_joints3d_epe_mean"],100*save_dict[f"pred{pid}_right_joints3d_epe_mean"],
+                                    100*save_dict[f"pred{pid}_left_joints3d_ra_epe_mean"],100*save_dict[f"pred{pid}_right_joints3d_ra_epe_mean"],
+                                    100*save_dict[f"pred{pid}_left_joints3d_local_epe_mean"],100*save_dict[f"pred{pid}_right_joints3d_local_epe_mean"]))
+
+        #for k,v in save_dict.items():
+        #    print(k,"{:.2f}".format(100*v))
         
         
         vae_results=evaluate.parse_evaluators(evaluators_vae)
@@ -611,7 +659,7 @@ def main(args=None):
 
 
     ckpt_name=args.pretrained_ckpt.split("/")[-1][:-3]
-    tag_out=f"vis_{args.val_dataset}_{args.val_split}_view_id{args.val_view_id}_minwindow{args.min_window_sec}_seqlen{args.seq_len}_{ckpt_name}"
+    tag_out=f"posegpt_{args.val_dataset}_{args.val_split}_view_id{args.val_view_id}_minwindow{args.min_window_sec}_seqlen{args.seq_len}"
 
 
     model_fid=None

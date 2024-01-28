@@ -303,7 +303,6 @@ class TransformerVQVAE(TransformerAutoEncoder):
         x=batch0['batch_seq_hand_comp_gt']
         batch_size, seq_len, *_ = x.size()
 
-
         valid=batch0['valid_frame'].view(batch_size,seq_len)
         mask = valid
         if verbose:

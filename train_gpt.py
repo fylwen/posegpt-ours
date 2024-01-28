@@ -36,6 +36,7 @@ from utils.amp_helpers import NativeScalerWithGradNormCount as NativeScaler
 
 from meshreg.datasets import collate
 from meshreg.netscripts import reloadmodel,get_dataset
+from meshreg.netscripts.timer import Timer
 from meshreg.models.utils_tra import loss_str2func,get_flatten_hand_feature, from_comp_to_joints, load_mano_mean_pose, get_inverse_Rt, compute_berts_for_strs_batch
 from torch.utils.data._utils.collate import default_collate
 
@@ -169,15 +170,27 @@ class GTrainer(Trainer):
         avg_nll, data_time, batch_time = [AverageMeter(k, ':6.3f') for k in ['Nll_latents', 'data_time', 'batch_time']]
         nll_meters = {'nll': avg_nll}
 
-        end = time.time()
+        #end = time.time()
         print("> Training...")
+
+        
+        epoch_fetch_timer = Timer()
+        epoch_gpu_timer = Timer()
+        epoch_eval_timer= Timer()
+        epoch_fetch_timer.tic()
+    
+
         for batch_idx, batch_flatten in enumerate(tqdm(data)):
-            data_time.update(time.time() - end)
+            #data_time.update(time.time() - end)
             #x, valid, actions = x.to(self.device), valid.to(self.device), actions.to(self.device)
             #x_noise, rotvec, rotmat, trans_gt, _, _ = self.preparator(x)
 
             #x_gt = torch.cat([rotmat[..., :2].flatten(2), trans_gt], -1)
             #seqlens = valid.sum(1)
+
+            
+            epoch_fetch_timer.toc()         
+            epoch_gpu_timer.tic()
 
             if self.args.use_amp:
                 assert False
@@ -195,16 +208,26 @@ class GTrainer(Trainer):
                 loss.backward()
 
             self.optimizer.step()
-            batch_time.update(time.time() - end)
-            end = time.time()
+            #batch_time.update(time.time() - end)
+            #end = time.time()
             avg_nll.update(nll)
 
+            epoch_gpu_timer.toc()
+            epoch_eval_timer.tic()
             #if self.current_iter % self.args.log_freq == 0 and self.current_iter > 0:
             #    for k, v in nll_meters.items():
             #        self.writer.add_scalar(f"loss/{k}", v.avg, self.current_iter)
             #        v.reset()
 
             self.current_iter += 1
+
+            
+            epoch_eval_timer.toc()       
+            timer_log=['fetch batch: {:.2f}s/batch'.format(epoch_fetch_timer.average_time),
+                  'on gpu: {:.2f}s/batch'.format(epoch_gpu_timer.average_time),
+                  'postprocess: {:.2f}s/batch'.format(epoch_eval_timer.average_time)]
+            print(timer_log)
+            epoch_fetch_timer.tic()
 
         for k, v in nll_meters.items():
             print(f"    - {k}: {v.avg:.3f}")

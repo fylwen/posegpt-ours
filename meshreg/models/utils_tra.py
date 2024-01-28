@@ -751,32 +751,106 @@ def embedding_lookup(query, embedding, verbose=False):
     return cosine_similarity,flat_1nn_indices
 
 
+#code adopt from VIBE
+def batch_compute_similarity_transform_torch(S1, S2, valid_joints, verbose=False):
+    '''
+    Computes a similarity transform (sR, t) that takes
+    a set of 3D points S1 (3 x N) closest to a set of 3D points S2,
+    where R is an 3x3 rotation matrix, t 3x1 translation, s scale.
+    i.e. solves the orthogonal Procrutes problem.
+    '''
+    
+    S1=S1.float()
+    S2=S2.float()
+    S1_ori=S1.clone()
+    #0. remove thumb root
+    S1=S1[:,valid_joints].contiguous()
+    S2=S2[:,valid_joints].contiguous()
 
 
+    transposed = False
+    if S1.shape[0] != 3 and S1.shape[0] != 2:
+        S1 = S1.permute(0,2,1)
+        S2 = S2.permute(0,2,1)
+        S1_ori=S1_ori.permute(0,2,1)
+        transposed = True
+    assert(S2.shape[1] == S1.shape[1])
 
-def compute_root_aligned_and_palmed_aligned(flatten_cent_joints_out, flatten_cent_joints_gt,align_to_gt_size, palm_joints=[0,5,9,13,17],verbose=False):
+    # 1. Remove mean.
+    mu1 = S1.mean(axis=-1, keepdims=True)
+    mu2 = S2.mean(axis=-1, keepdims=True)
+
+    X1 = S1 - mu1
+    X2 = S2 - mu2
+
+    # 2. Compute variance of X1 used for scale.
+    var1 = torch.sum(X1**2, dim=1).sum(dim=1)
+
+    # 3. The outer product of X1 and X2.
+    K = X1.bmm(X2.permute(0,2,1))
+    
+    if verbose:
+        print("S1,S2",S1.shape,S2.shape)#[bs,3,20]x2
+        print("mu1,mu2",mu1.shape,mu2.shape)#[bs,3,1]x2
+        print("var1",var1.shape,torch.sum(X1**2, dim=1).shape)#[bs],[bs,20]
+        print("K",K.shape)#[bs,3,3]
+
+    # 4. Solution that Maximizes trace(R'K) is R=U*V', where U, V are
+    # singular vectors of K.
+    U, s, V = torch.svd(K)
+
+    # Construct Z that fixes the orientation of R to get det(R)=1.
+    Z = torch.eye(U.shape[1], device=S1.device).unsqueeze(0)
+    Z = Z.repeat(U.shape[0],1,1)
+    Z[:,-1, -1] *= torch.sign(torch.det(U.bmm(V.permute(0,2,1))))
+
+    # Construct R.
+    R = V.bmm(Z.bmm(U.permute(0,2,1)))
+
+    # 5. Recover scale.
+    scale = torch.cat([torch.trace(x).unsqueeze(0) for x in R.bmm(K)]) / var1
+
+    # 6. Recover translation.
+    t = mu2 - (scale.unsqueeze(-1).unsqueeze(-1) * (R.bmm(mu1)))
+
+    # 7. Error:
+    S1_hat = scale.unsqueeze(-1).unsqueeze(-1) * R.bmm(S1_ori) + t
+
+    if transposed:
+        S1_hat = S1_hat.permute(0,2,1)
+
+    
+    if verbose:
+        print("R",R.shape)#[bs,3,3]
+        print("scale",scale.shape)#[bs]
+        print("t",t.shape)#[bs,3,1]
+        print("S1_hat",S1_hat.shape)#[bs,21,3]
+        
+    return S1_hat
+
+
+def compute_root_aligned_and_palmed_aligned(flatten_ra_joints_out, flatten_ra_joints_gt,align_to_gt_size, valid_joints, palm_joints=[0,5,9,13,17],verbose=False):
     root_idx=palm_joints[0]
     return_results={}
     for tag in ["left","right"]:
-        flatten_cent_chand_out=(flatten_cent_joints_out[:,:21] if tag=="left" else flatten_cent_joints_out[:,21:]).clone().contiguous()
-        flatten_cent_chand_gt=(flatten_cent_joints_gt[:,:21] if tag=="left" else flatten_cent_joints_gt[:,21:]).clone().contiguous()
+        flatten_ra_chand_out=(flatten_ra_joints_out[:,:21] if tag=="left" else flatten_ra_joints_out[:,21:]).clone().contiguous()
+        flatten_ra_chand_gt=(flatten_ra_joints_gt[:,:21] if tag=="left" else flatten_ra_joints_gt[:,21:]).clone().contiguous()
 
         if align_to_gt_size:
-            palm_size_out=torch.mean(torch.norm(flatten_cent_chand_out[:,palm_joints[1:]]-flatten_cent_chand_out[:,root_idx:root_idx+1],p=2,dim=-1),dim=1).view(-1,1,1)
-            palm_size_gt=torch.mean(torch.norm(flatten_cent_chand_gt[:,palm_joints[1:]]-flatten_cent_chand_gt[:,root_idx:root_idx+1],p=2,dim=-1),dim=1).view(-1,1,1)#
+            palm_size_out=torch.mean(torch.norm(flatten_ra_chand_out[:,palm_joints[1:]]-flatten_ra_chand_out[:,root_idx:root_idx+1],p=2,dim=-1),dim=1).view(-1,1,1)
+            palm_size_gt=torch.mean(torch.norm(flatten_ra_chand_gt[:,palm_joints[1:]]-flatten_ra_chand_gt[:,root_idx:root_idx+1],p=2,dim=-1),dim=1).view(-1,1,1)#
             
             if verbose:
-                print("flatten_cent_chand_out/gt",flatten_cent_chand_out.shape,flatten_cent_chand_gt.shape)#[bs,21,3]
+                print("flatten_ra_chand_out/gt",flatten_ra_chand_out.shape,flatten_ra_chand_gt.shape)#[bs,21,3]
                 print("palm_size",palm_size_out.shape,palm_size_gt.shape)#[bs,1,1]
-                print("computation",(flatten_cent_chand_out[:,palm_joints[1:]]-flatten_cent_chand_out[:,root_idx:root_idx+1]).shape)
-                print((flatten_cent_chand_gt[:,palm_joints[1:]]-flatten_cent_chand_gt[:,root_idx:root_idx+1]).shape)#[bs,4,3]
-                print(torch.norm(flatten_cent_chand_out[:,palm_joints[1:]]-flatten_cent_chand_out[:,root_idx:root_idx+1],p=2,dim=-1).shape)
-                print(torch.norm(flatten_cent_chand_gt[:,palm_joints[1:]]-flatten_cent_chand_gt[:,root_idx:root_idx+1],p=2,dim=-1).shape)#[bs,4]
+                print("computation",(flatten_ra_chand_out[:,palm_joints[1:]]-flatten_ra_chand_out[:,root_idx:root_idx+1]).shape)
+                print((flatten_ra_chand_gt[:,palm_joints[1:]]-flatten_ra_chand_gt[:,root_idx:root_idx+1]).shape)#[bs,4,3]
+                print(torch.norm(flatten_ra_chand_out[:,palm_joints[1:]]-flatten_ra_chand_out[:,root_idx:root_idx+1],p=2,dim=-1).shape)
+                print(torch.norm(flatten_ra_chand_gt[:,palm_joints[1:]]-flatten_ra_chand_gt[:,root_idx:root_idx+1],p=2,dim=-1).shape)#[bs,4]
             
             assert (palm_size_out>0).all()
-            flatten_cent_chand_out=(1./palm_size_out)*palm_size_gt*flatten_cent_chand_out
+            flatten_ra_chand_out=(1./palm_size_out)*palm_size_gt*flatten_ra_chand_out
             
-        return_results[f"flatten_{tag}_ra_out"]=flatten_cent_chand_out
-        return_results[f"flatten_{tag}_ra_gt"]=flatten_cent_chand_gt
-        return_results[f"flatten_{tag}_pa_out"]=transform_by_align_a2b(flatten_cam_a=flatten_cent_chand_out,flatten_cam_b=flatten_cent_chand_gt)
+        return_results[f"flatten_{tag}_ra_out"]=flatten_ra_chand_out
+        return_results[f"flatten_{tag}_pa_out"]=batch_compute_similarity_transform_torch(flatten_ra_chand_out,flatten_ra_chand_gt,valid_joints)#=transform_by_align_a2b(flatten_cam_a=flatten_ra_chand_out,flatten_cam_b=flatten_ra_chand_gt)#
     return return_results
